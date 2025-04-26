@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 from settings import SettingsPanel
 
 class DevMetricsApp(QMainWindow):
@@ -20,6 +22,7 @@ class DevMetricsApp(QMainWindow):
         super().__init__()
         self.setWindowTitle("Анализатор продуктивности")
         self.settings = QSettings("MyCompany", "DevMetricsApp")
+        self.observer = None  # Для наблюдения за файловой системой
         self.init_ui()
 
     def init_ui(self):
@@ -187,9 +190,23 @@ class DevMetricsApp(QMainWindow):
         self.update_graph_metrics()
 
     def closeEvent(self, event):
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
         self.settings.setValue("project_path", self.settings_panel.project_path_input.text())
         self.settings.setValue("theme", self.settings_panel.theme_selector.currentText())
         event.accept()
+
+    def start_file_watcher(self, project_path):
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+
+        if project_path and os.path.exists(project_path) and os.path.exists(os.path.join(project_path, '.git')):
+            self.observer = Observer()
+            event_handler = FileChangeHandler(self)
+            self.observer.schedule(event_handler, project_path, recursive=True)
+            self.observer.start()
 
     def update_time_metrics(self):
         project_path = self.settings_panel.project_path_input.text()
@@ -379,12 +396,44 @@ class DevMetricsApp(QMainWindow):
                     files.append(os.path.join(root, filename))
         return files
 
+class FileChangeHandler(FileSystemEventHandler):
+    def __init__(self, app):
+        self.app = app
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self.app.update_time_metrics()
+            self.app.update_code_metrics()
+            self.app.update_graph_metrics()
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self.app.update_time_metrics()
+            self.app.update_code_metrics()
+            self.app.update_graph_metrics()
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self.app.update_time_metrics()
+            self.app.update_code_metrics()
+            self.app.update_graph_metrics()
+
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
         self.axes = fig.add_subplot(111)
         super().__init__(fig)
         self.setParent(parent)
+
+
+
+
+
+
+
+
+
+
 
 
 

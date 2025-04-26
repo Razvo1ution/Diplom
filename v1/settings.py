@@ -53,6 +53,7 @@ class SettingsPanel(QWidget):
         self.parent.update_time_metrics()
         self.parent.update_code_metrics()
         self.parent.update_graph_metrics()
+        self.parent.start_file_watcher(project_path)
 
     def change_theme(self, theme_name):
         theme_func = self.themes.get(theme_name, self.light_theme)
