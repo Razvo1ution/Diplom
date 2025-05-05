@@ -1,6 +1,6 @@
-import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import os
 
 def start_file_watcher(app, project_path):
     observer = None

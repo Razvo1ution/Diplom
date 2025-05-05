@@ -51,8 +51,8 @@ class SettingsPanel(QWidget):
                 QMessageBox.warning(self, "Ошибка", "Указанная папка не является Git-репозиторием")
                 self.parent.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
                 self.parent.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-                self.parent.time_histogram.axes.clear()
-                self.parent.time_histogram.draw()
+                self.parent.time_heatmap.axes.clear()
+                self.parent.time_heatmap.draw()
                 self.parent.trend_graph.axes.clear()
                 self.parent.trend_graph.draw()
                 return
