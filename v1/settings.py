@@ -40,20 +40,39 @@ class SettingsPanel(QWidget):
 
     def apply_settings(self):
         project_path = self.project_path_input.text()
-        if project_path and os.path.exists(project_path):
-            if not os.path.exists(os.path.join(project_path, '.git')):
-                QMessageBox.warning(self, "Ошибка", "Указанная папка не является Git-репозиторием")
+        try:
+            # Проверяем существование пути
+            if project_path and not os.path.exists(project_path):
+                QMessageBox.warning(self, "Ошибка", "Указанный путь не существует")
                 return
 
-        self.parent.settings.setValue("project_path", project_path)
-        self.parent.settings.setValue("theme", self.theme_selector.currentText())
-        self.parent.settings.sync()
+            # Проверяем, является ли папка Git-репозиторием
+            if project_path and not os.path.exists(os.path.join(project_path, '.git')):
+                QMessageBox.warning(self, "Ошибка", "Указанная папка не является Git-репозиторием")
+                self.parent.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
+                self.parent.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
+                self.parent.time_histogram.axes.clear()
+                self.parent.time_histogram.draw()
+                self.parent.trend_graph.axes.clear()
+                self.parent.trend_graph.draw()
+                return
 
-        self.change_theme(self.theme_selector.currentText())
-        self.parent.update_time_metrics()
-        self.parent.update_code_metrics()
-        self.parent.update_graph_metrics()
-        self.parent.start_file_watcher(project_path)
+            # Сохраняем настройки
+            self.parent.settings.setValue("project_path", project_path)
+            self.parent.settings.setValue("theme", self.theme_selector.currentText())
+            self.parent.settings.sync()
+
+            # Применяем тему
+            self.change_theme(self.theme_selector.currentText())
+
+            # Обновляем метрики и наблюдатель
+            self.parent.update_opening_hours()
+            self.parent.update_code_analysis()
+            self.parent.update_charts()
+            self.parent.start_file_watcher(project_path)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Произошла ошибка при применении настроек: {str(e)}")
 
     def change_theme(self, theme_name):
         theme_func = self.themes.get(theme_name, self.light_theme)

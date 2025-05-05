@@ -1,29 +1,41 @@
 import sys
-import os
-from datetime import datetime, timedelta
-from git import Repo
-from git.exc import InvalidGitRepositoryError
-from radon.complexity import cc_visit
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
                              QPushButton, QTabWidget, QHBoxLayout, QDockWidget,
-                             QDesktopWidget, QLabel, QTextEdit)
-from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings
+                             QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox,
+                             QMessageBox)
+from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings, QTimer
 from PyQt5.QtGui import QIcon
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-import numpy as np
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 from settings import SettingsPanel
+from OpeningHours import update_opening_hours, get_years
+from CodeAnalysis import update_code_analysis
+from Charts import update_charts
+from WorkSchedule import WorkSchedulePanel
+from ActivityTracker import ActivityTracker
+from datetime import datetime
+import numpy as np
+import os
+import logging
+
+# Настройка логирования
+logging.basicConfig(filename='app.log', level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 class DevMetricsApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Анализатор продуктивности")
         self.settings = QSettings("MyCompany", "DevMetricsApp")
-        self.observer = None  # Для наблюдения за файловой системой
-        self.init_ui()
+        self.lunch_file = os.path.join(os.path.expanduser("~"), ".devmetrics_lunch")
+        self.activity_tracker = None
+        self.update_timer = None
+        try:
+            self.init_ui()
+            logging.info("Приложение инициализировано")
+        except Exception as e:
+            logging.error(f"Ошибка при инициализации приложения: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось запустить приложение: {str(e)}")
 
     def init_ui(self):
         self.setFixedSize(1000, 800)
@@ -35,10 +47,16 @@ class DevMetricsApp(QMainWindow):
 
         self.create_top_panel()
         self.create_settings_panel()
+        self.create_work_schedule_panel()
         self.create_tabs()
         self.create_menu_panel()
 
         self.load_settings()
+
+        # Таймер для обновления интерфейса
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_and_update)
+        self.update_timer.start(2000)  # Проверка каждые 2 секунды
 
     def center_window(self):
         screen = QDesktopWidget().screenGeometry()
@@ -61,26 +79,52 @@ class DevMetricsApp(QMainWindow):
 
     def create_tabs(self):
         self.tabs = QTabWidget()
-        self.create_time_tab()
-        self.create_code_tab()
-        self.create_graph_tab()
+        self.create_opening_hours_tab()
+        self.create_code_analysis_tab()
+        self.create_charts_tab()
         self.main_layout.addWidget(self.tabs)
 
-    def create_time_tab(self):
-        time_tab = QWidget()
-        time_layout = QVBoxLayout(time_tab)
+    def create_opening_hours_tab(self):
+        self.time_tab = QWidget()
+        time_layout = QVBoxLayout(self.time_tab)
 
         time_layout.addWidget(QLabel("Активное время работы:"))
         self.time_metrics = QTextEdit()
         self.time_metrics.setReadOnly(True)
         time_layout.addWidget(self.time_metrics)
 
-        self.time_heatmap = MplCanvas(self, width=8, height=4, dpi=100)
-        time_layout.addWidget(self.time_heatmap)
+        # Выбор месяца и года
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(QLabel("Месяц:"))
+        self.month_selector = QComboBox()
+        self.month_selector.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                      "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.month_selector.currentIndexChanged.connect(self.update_opening_hours)
+        controls_layout.addWidget(self.month_selector)
 
-        self.tabs.addTab(time_tab, "Время работы")
+        controls_layout.addWidget(QLabel("Год:"))
+        self.year_selector = QComboBox()
+        self.year_selector.currentTextChanged.connect(self.update_opening_hours)
+        controls_layout.addWidget(self.year_selector)
 
-    def create_code_tab(self):
+        # Кнопка "Обед"
+        self.lunch_btn = QPushButton("Обед")
+        self.lunch_btn.clicked.connect(self.take_lunch)
+        controls_layout.addWidget(self.lunch_btn)
+
+        controls_layout.addStretch()
+        time_layout.addLayout(controls_layout)
+
+        self.time_histogram = MplCanvas(self, width=8, height=4, dpi=100)
+        time_layout.addWidget(self.time_histogram)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        time_layout.addWidget(self.progress_bar)
+
+        self.tabs.addTab(self.time_tab, "Время работы")
+
+    def create_code_analysis_tab(self):
         code_tab = QWidget()
         code_layout = QVBoxLayout(code_tab)
 
@@ -91,7 +135,7 @@ class DevMetricsApp(QMainWindow):
 
         self.tabs.addTab(code_tab, "Анализ кода")
 
-    def create_graph_tab(self):
+    def create_charts_tab(self):
         graph_tab = QWidget()
         graph_layout = QVBoxLayout(graph_tab)
 
@@ -112,9 +156,15 @@ class DevMetricsApp(QMainWindow):
         settings_btn.setIcon(QIcon.fromTheme("configure"))
         settings_btn.setText("Настройки")
         settings_btn.clicked.connect(self.toggle_settings)
-        menu_layout.addStretch()
-        menu_layout.addWidget(settings_btn, alignment=Qt.AlignBottom)
+        menu_layout.addWidget(settings_btn)
 
+        schedule_btn = QPushButton()
+        schedule_btn.setIcon(QIcon.fromTheme("calendar"))
+        schedule_btn.setText("Рабочий график")
+        schedule_btn.clicked.connect(self.toggle_work_schedule)
+        menu_layout.addWidget(schedule_btn)
+
+        menu_layout.addStretch()
         self.menu_dock.setWidget(menu_widget)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.menu_dock)
         self.menu_dock.hide()
@@ -140,283 +190,276 @@ class DevMetricsApp(QMainWindow):
         self.settings_widget.hide()
         self.main_layout.addWidget(self.settings_widget)
 
+    def create_work_schedule_panel(self):
+        self.work_schedule_widget = QWidget()
+        schedule_layout = QVBoxLayout(self.work_schedule_widget)
+
+        close_layout = QHBoxLayout()
+        close_layout.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.clicked.connect(self.toggle_work_schedule)
+        close_layout.addWidget(close_btn)
+        schedule_layout.addLayout(close_layout)
+
+        self.work_schedule_panel = WorkSchedulePanel(self)
+        schedule_layout.addWidget(self.work_schedule_panel)
+
+        self.work_schedule_widget.hide()
+        self.main_layout.addWidget(self.work_schedule_widget)
+
     def toggle_menu(self):
-        if self.menu_dock.isVisible():
-            start_geometry = self.menu_dock.geometry()
-            end_geometry = QRect(-300, start_geometry.y(), 300, start_geometry.height())
-            self.menu_animation.setStartValue(start_geometry)
-            self.menu_animation.setEndValue(end_geometry)
-            self.menu_animation.finished.connect(self.menu_dock.hide)
-            self.menu_animation.start()
-            self.menu_btn.setChecked(False)
-            self.menu_btn.setText("Меню")
-            self.menu_btn.setStyleSheet("")
-        else:
-            self.menu_dock.show()
-            start_geometry = QRect(-300, 0, 300, self.height())
-            end_geometry = QRect(0, 0, 300, self.height())
-            self.menu_animation.setStartValue(start_geometry)
-            self.menu_animation.setEndValue(end_geometry)
-            self.menu_animation.start()
-            self.menu_btn.setChecked(True)
-            self.menu_btn.setText("Закрыть меню")
-            self.menu_btn.setStyleSheet("""
-                QPushButton:checked {
-                    background-color: #d0d0d0;
-                    border: 2px solid #555;
-                }
-            """)
+        try:
+            if self.menu_dock.isVisible():
+                start_geometry = self.menu_dock.geometry()
+                end_geometry = QRect(-300, start_geometry.y(), 300, start_geometry.height())
+                self.menu_animation.setStartValue(start_geometry)
+                self.menu_animation.setEndValue(end_geometry)
+                self.menu_animation.finished.connect(self.menu_dock.hide)
+                self.menu_animation.start()
+                self.menu_btn.setChecked(False)
+                self.menu_btn.setText("Меню")
+                self.menu_btn.setStyleSheet("")
+            else:
+                self.menu_dock.show()
+                start_geometry = QRect(-300, 0, 300, self.height())
+                end_geometry = QRect(0, 0, 300, self.height())
+                self.menu_animation.setStartValue(start_geometry)
+                self.menu_animation.setEndValue(end_geometry)
+                self.menu_animation.start()
+                self.menu_btn.setChecked(True)
+                self.menu_btn.setText("Закрыть меню")
+                self.menu_btn.setStyleSheet("""
+                    QPushButton:checked {
+                        background-color: #d0d0d0;
+                        border: 2px solid #555;
+                    }
+                """)
+        except Exception as e:
+            logging.error(f"Ошибка в toggle_menu: {str(e)}")
 
     def toggle_settings(self):
-        if self.settings_widget.isVisible():
-            self.settings_widget.hide()
-            self.tabs.show()
-        else:
-            self.tabs.hide()
-            self.settings_widget.show()
-            if self.menu_dock.isVisible():
-                self.toggle_menu()
+        try:
+            if self.settings_widget.isVisible():
+                self.settings_widget.hide()
+                self.tabs.show()
+            else:
+                self.tabs.hide()
+                self.work_schedule_widget.hide()
+                self.settings_widget.show()
+                if self.menu_dock.isVisible():
+                    self.toggle_menu()
+        except Exception as e:
+            logging.error(f"Ошибка в toggle_settings: {str(e)}")
+
+    def toggle_work_schedule(self):
+        try:
+            if self.work_schedule_widget.isVisible():
+                self.work_schedule_widget.hide()
+                self.tabs.show()
+            else:
+                self.tabs.hide()
+                self.settings_widget.hide()
+                self.work_schedule_widget.show()
+                if self.menu_dock.isVisible():
+                    self.toggle_menu()
+        except Exception as e:
+            logging.error(f"Ошибка в toggle_work_schedule: {str(e)}")
+
+    def take_lunch(self):
+        """Обрабатывает нажатие кнопки 'Обед'."""
+        try:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            project_path = self.settings_panel.project_path_input.text()
+            if not project_path or not os.path.exists(project_path):
+                QMessageBox.warning(self, "Ошибка", "Укажите корректный путь к проекту в настройках")
+                return
+            tracker = ActivityTracker(project_path, self.lunch_file, self.set_new_activity)
+            if tracker.can_take_lunch(today_str):
+                tracker.record_lunch(today_str, datetime.now().timestamp())
+                self.lunch_btn.setEnabled(False)
+                self.update_opening_hours()
+                QMessageBox.information(self, "Обед", "Обед зарегистрирован (1 час)")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Обед уже был взят сегодня!")
+        except Exception as e:
+            logging.error(f"Ошибка в take_lunch: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось зарегистрировать обед: {str(e)}")
 
     def load_settings(self):
-        project_path = self.settings.value("project_path", "")
-        self.settings_panel.project_path_input.setText(project_path)
+        try:
+            project_path = self.settings.value("project_path", "")
+            self.settings_panel.project_path_input.setText(project_path)
 
-        theme = self.settings.value("theme", "Светлая")
-        self.settings_panel.theme_selector.setCurrentText(theme)
-        self.settings_panel.change_theme(theme)
+            theme = self.settings.value("theme", "Светлая")
+            self.settings_panel.theme_selector.setCurrentText(theme)
+            self.settings_panel.change_theme(theme)
 
-        self.update_time_metrics()
-        self.update_code_metrics()
-        self.update_graph_metrics()
+            self.update_years()
+            self.update_opening_hours()
+            self.update_code_analysis()
+            self.update_charts()
+            self.start_activity_tracker(project_path)
+        except Exception as e:
+            logging.error(f"Ошибка в load_settings: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки настроек: {str(e)}")
 
     def closeEvent(self, event):
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
-        self.settings.setValue("project_path", self.settings_panel.project_path_input.text())
-        self.settings.setValue("theme", self.settings_panel.theme_selector.currentText())
-        event.accept()
-
-    def start_file_watcher(self, project_path):
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
-
-        if project_path and os.path.exists(project_path) and os.path.exists(os.path.join(project_path, '.git')):
-            self.observer = Observer()
-            event_handler = FileChangeHandler(self)
-            self.observer.schedule(event_handler, project_path, recursive=True)
-            self.observer.start()
-
-    def update_time_metrics(self):
-        project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.time_metrics.setText("Укажите путь к проекту в настройках")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
-            return
-
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            if not commits:
-                self.time_metrics.setText("В репозитории нет коммитов")
-                self.time_heatmap.axes.clear()
-                self.time_heatmap.draw()
+            if self.activity_tracker:
+                self.activity_tracker.stop_listeners()
+                self.activity_tracker.stop_file_watcher()
+            if self.update_timer:
+                self.update_timer.stop()
+            self.settings.setValue("project_path", self.settings_panel.project_path_input.text())
+            self.settings.setValue("theme", self.settings_panel.theme_selector.currentText())
+            event.accept()
+        except Exception as e:
+            logging.error(f"Ошибка в closeEvent: {str(e)}")
+
+    def stop_activity_tracker(self):
+        try:
+            if self.activity_tracker:
+                self.activity_tracker.stop_listeners()
+                self.activity_tracker.stop_file_watcher()
+                self.activity_tracker = None
+            if self.update_timer:
+                self.update_timer.stop()
+        except Exception as e:
+            logging.error(f"Ошибка в stop_activity_tracker: {str(e)}")
+
+    def start_activity_tracker(self, project_path):
+        try:
+            self.stop_activity_tracker()
+            if project_path and os.path.exists(project_path):
+                self.activity_tracker = ActivityTracker(project_path, self.lunch_file, self.set_new_activity)
+                self.update_timer.start(2000)
+                logging.info(f"ActivityTracker запущен для {project_path}")
+            else:
+                logging.warning("Не указан или некорректен путь к проекту")
+        except Exception as e:
+            logging.error(f"Ошибка в start_activity_tracker: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось запустить отслеживание: {str(e)}")
+
+    def set_new_activity(self):
+        """Устанавливает флаг новой активности."""
+        try:
+            if self.activity_tracker:
+                self.activity_tracker.new_activity = True
+            logging.debug("Флаг new_activity установлен")
+        except Exception as e:
+            logging.error(f"Ошибка в set_new_activity: {str(e)}")
+
+    def check_and_update(self):
+        """Проверяет флаг new_activity и обновляет интерфейс."""
+        try:
+            if self.activity_tracker and self.activity_tracker.new_activity:
+                self.update_opening_hours()
+                self.activity_tracker.new_activity = False
+                logging.debug("Интерфейс обновлён из-за новой активности")
+        except Exception as e:
+            logging.error(f"Ошибка в check_and_update: {str(e)}")
+
+    def update_years(self):
+        try:
+            project_path = self.settings_panel.project_path_input.text()
+            years = get_years(project_path)
+            self.year_selector.clear()
+            self.year_selector.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.year_selector.setCurrentText(current_year)
+        except Exception as e:
+            logging.error(f"Ошибка в update_years: {str(e)}")
+
+    def update_opening_hours(self):
+        try:
+            project_path = self.settings_panel.project_path_input.text()
+            if not project_path or not os.path.exists(project_path):
+                self.time_metrics.setText("Укажите корректный путь к проекту в настройках")
+                self.time_histogram.axes.clear()
+                self.time_histogram.draw()
                 return
-
-            today = datetime.now()
-            week_ago = today - timedelta(days=7)
-            daily_hours = 0
-            weekly_hours = 0
-            session_times = []
-            last_commit_time = None
-
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                if commit_time.date() == today.date():
-                    daily_hours += 1 / 60
-                if commit_time >= week_ago:
-                    weekly_hours += 1 / 60
-                if last_commit_time:
-                    session_times.append((last_commit_time - commit_time).total_seconds() / 3600)
-                last_commit_time = commit_time
-
-            avg_session = sum(session_times) / len(session_times) if session_times else 0
-
-            norm_hours = 8
-            overtime = max(0, daily_hours - norm_hours)
-            underwork = max(0, norm_hours - daily_hours)
-
-            metrics_text = (
-                f"Часы кодинга сегодня: {daily_hours:.2f} ч\n"
-                f"Часы кодинга за неделю: {weekly_hours:.2f} ч\n"
-                f"Средняя продолжительность сессии: {avg_session:.2f} ч\n"
-                f"Овертайм: {overtime:.2f} ч\n"
-                f"Недоработка: {underwork:.2f} ч"
-            )
+            month = self.month_selector.currentIndex() + 1
+            year = int(self.year_selector.currentText()) if self.year_selector.currentText() else datetime.now().year
+            metrics_text, days, hours, weekend_days = update_opening_hours(project_path, month, year, self.lunch_file)
             self.time_metrics.setText(metrics_text)
 
-            hours = np.zeros((7, 24))
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                if commit_time >= week_ago:
-                    day = commit_time.weekday()
-                    hour = commit_time.hour
-                    hours[day, hour] += 1
+            self.time_histogram.axes.clear()
+            if days and hours:
+                hours_per_day = self.work_schedule_panel.get_hours_per_day()
+                colors = []
+                for i, day in enumerate(days):
+                    if day in weekend_days:
+                        colors.append('red')
+                    elif hours[i] > hours_per_day:
+                        colors.append('orange')
+                    else:
+                        colors.append('blue')
 
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.axes.imshow(hours, cmap='hot', interpolation='nearest')
-            self.time_heatmap.axes.set_xticks(range(24))
-            self.time_heatmap.axes.set_yticks(range(7))
-            self.time_heatmap.axes.set_yticklabels(['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'])
-            self.time_heatmap.axes.set_xlabel("Часы")
-            self.time_heatmap.axes.set_ylabel("Дни недели")
-            self.time_heatmap.axes.set_title("Heatmap активности")
-            self.time_heatmap.draw()
+                self.time_histogram.axes.bar(days, hours, color=colors)
+                self.time_histogram.axes.set_xticks(days)
 
-        except InvalidGitRepositoryError:
-            self.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
+                labels = [str(day) for day in days]
+                for i, label in enumerate(self.time_histogram.axes.get_xticklabels()):
+                    label.set_color('red' if days[i] in weekend_days else 'blue')
+
+                self.time_histogram.axes.set_xticklabels(labels)
+                self.time_histogram.axes.set_xlabel("Дни месяца")
+                self.time_histogram.axes.set_ylabel("Отработанные часы")
+                self.time_histogram.axes.set_title(
+                    f"График отработанного времени ({self.month_selector.currentText()} {year})")
+
+                max_hours = max(int(np.ceil(max(hours, default=0))), int(hours_per_day))
+                self.time_histogram.axes.set_yticks(np.arange(0, max_hours + 1, 1))
+
+            self.time_histogram.draw()
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            tracker = ActivityTracker(project_path, self.lunch_file, self.set_new_activity)
+            self.lunch_btn.setEnabled(tracker.can_take_lunch(today_str))
+
         except Exception as e:
-            self.time_metrics.setText(f"Ошибка при анализе репозитория: {str(e)}")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
+            logging.error(f"Ошибка в update_opening_hours: {str(e)}")
+            self.time_metrics.setText(f"Ошибка: {str(e)}")
+            self.time_histogram.axes.clear()
+            self.time_histogram.draw()
 
-    def update_code_metrics(self):
-        project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.code_metrics.setText("Укажите путь к проекту в настройках")
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            return
-
+    def update_code_analysis(self):
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            added_lines = 0
-            deleted_lines = 0
-            hotspots = {}
-            python_files = [f for f in self.get_project_files(project_path) if f.endswith('.py')]
-
-            for commit in commits:
-                diff = commit.stats.total
-                added_lines += diff['insertions']
-                deleted_lines += diff['deletions']
-                for file in commit.stats.files:
-                    hotspots[file] = hotspots.get(file, 0) + 1
-
-            total_cc = 0
-            complex_files = []
-            for file in python_files:
-                with open(file, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                cc_results = cc_visit(code)
-                file_cc = sum(block.complexity for block in cc_results)
-                total_cc += file_cc
-                if file_cc > 10:
-                    complex_files.append((file, file_cc))
-
-            avg_cc = total_cc / len(python_files) if python_files else 0
-            hotspots_text = "\n".join(f"{file}: {count} изменений" for file, count in sorted(hotspots.items(), key=lambda x: x[1], reverse=True)[:5])
-
-            metrics_text = (
-                f"Добавлено строк: {added_lines}\n"
-                f"Удалено строк: {deleted_lines}\n"
-                f"Средняя цикломатическая сложность: {avg_cc:.2f}\n"
-                f"Сложные файлы:\n" + "\n".join(f"{file}: {cc}" for file, cc in complex_files[:5]) + "\n"
-                f"Часто изменяемые файлы:\n{hotspots_text}\n"
-                f"Рекомендации: Проверить файлы с высокой сложностью для рефакторинга."
-            )
+            project_path = self.settings_panel.project_path_input.text()
+            if not project_path or not os.path.exists(project_path):
+                self.code_metrics.setText("Укажите корректный путь к проекту в настройках")
+                return
+            metrics_text = update_code_analysis(project_path, self.progress_bar)
             self.code_metrics.setText(metrics_text)
-
-        except InvalidGitRepositoryError:
-            self.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
         except Exception as e:
-            self.code_metrics.setText(f"Ошибка при анализе кода: {str(e)}")
+            logging.error(f"Ошибка в update_code_analysis: {str(e)}")
+            self.code_metrics.setText(f"Ошибка: {str(e)}")
+        finally:
+            self.progress_bar.setVisible(False)
 
-    def update_graph_metrics(self):
-        project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
-            return
-
+    def update_charts(self):
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            weeks = 4
-            commits_per_week = [0] * weeks
-            today = datetime.now()
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                weeks_ago = (today - commit_time).days // 7
-                if weeks_ago < weeks:
-                    commits_per_week[weeks_ago] += 1
-
+            project_path = self.settings_panel.project_path_input.text()
+            if not project_path or not os.path.exists(project_path):
+                self.trend_graph.axes.clear()
+                self.trend_graph.draw()
+                return
+            weeks, commits_per_week = update_charts(project_path)
             self.trend_graph.axes.clear()
-            self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o')
-            self.trend_graph.axes.set_xticks(range(weeks))
-            self.trend_graph.axes.set_xticklabels([f"Неделя {i+1}" for i in range(weeks)])
-            self.trend_graph.axes.set_xlabel("Недели")
-            self.trend_graph.axes.set_ylabel("Количество коммитов")
-            self.trend_graph.axes.set_title("Тренд продуктивности")
-            self.trend_graph.draw()
-
-        except InvalidGitRepositoryError:
-            self.trend_graph.axes.clear()
+            if weeks and commits_per_week:
+                self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o')
+                self.trend_graph.axes.set_xticks(range(weeks))
+                self.trend_graph.axes.set_xticklabels([f"Неделя {i + 1}" for i in range(weeks)])
+                self.trend_graph.axes.set_xlabel("Недели")
+                self.trend_graph.axes.set_ylabel("Количество коммитов")
+                self.trend_graph.axes.set_title("Тренд продуктивности")
             self.trend_graph.draw()
         except Exception as e:
+            logging.error(f"Ошибка в update_charts: {str(e)}")
             self.trend_graph.axes.clear()
             self.trend_graph.draw()
-
-    def get_project_files(self, project_path):
-        files = []
-        for root, _, filenames in os.walk(project_path):
-            for filename in filenames:
-                if filename.endswith(('.py', '.js', '.java', '.cs', '.cpp', '.h', '.go', '.rs', '.kt', '.swift',
-                                      '.json', '.yaml', '.yml', '.toml', '.env', 'Dockerfile', '.dockerignore',
-                                      '.md', '.rst', 'README.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md',
-                                      'CODESTYLE.md', 'package.json', 'requirements.txt', 'pom.xml', 'build.gradle',
-                                      'Cargo.toml', '.csproj', '.sln', '.css', '.scss', '.png', '.jpg', '.svg', '.html')):
-                    files.append(os.path.join(root, filename))
-        return files
-
-class FileChangeHandler(FileSystemEventHandler):
-    def __init__(self, app):
-        self.app = app
-
-    def on_modified(self, event):
-        if not event.is_directory:
-            self.app.update_time_metrics()
-            self.app.update_code_metrics()
-            self.app.update_graph_metrics()
-
-    def on_created(self, event):
-        if not event.is_directory:
-            self.app.update_time_metrics()
-            self.app.update_code_metrics()
-            self.app.update_graph_metrics()
-
-    def on_deleted(self, event):
-        if not event.is_directory:
-            self.app.update_time_metrics()
-            self.app.update_code_metrics()
-            self.app.update_graph_metrics()
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
@@ -425,25 +468,12 @@ class MplCanvas(FigureCanvas):
         super().__init__(fig)
         self.setParent(parent)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    window = DevMetricsApp()
-    window.show()
-    sys.exit(app.exec_())
+    try:
+        app = QApplication(sys.argv)
+        app.setStyle("Fusion")
+        window = DevMetricsApp()
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        logging.error(f"Ошибка при запуске приложения: {str(e)}")
