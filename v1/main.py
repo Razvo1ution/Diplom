@@ -15,7 +15,8 @@ from WorkSchedule import WorkSchedulePanel
 from datetime import datetime
 import numpy as np
 import calendar
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 class DevMetricsApp(QMainWindow):
     def __init__(self):
@@ -26,7 +27,7 @@ class DevMetricsApp(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setFixedSize(1000, 800)
+        self.setFixedSize(1000, 1000)
         self.center_window()
 
         self.central_widget = QWidget()
@@ -71,7 +72,7 @@ class DevMetricsApp(QMainWindow):
         self.time_tab = QWidget()
         time_layout = QVBoxLayout(self.time_tab)
 
-        time_layout.addWidget(QLabel("Активное время работы:"))
+        time_layout.addWidget(QLabel("Время работы:"))
         self.time_metrics = QTextEdit()
         self.time_metrics.setReadOnly(True)
         time_layout.addWidget(self.time_metrics)
@@ -93,8 +94,13 @@ class DevMetricsApp(QMainWindow):
         controls_layout.addStretch()
         time_layout.addLayout(controls_layout)
 
+        # Гистограмма
         self.time_histogram = MplCanvas(self, width=8, height=4, dpi=100)
         time_layout.addWidget(self.time_histogram)
+
+        # Heatmap
+        self.time_heatmap = MplCanvas(self, width=8, height=4, dpi=100)
+        time_layout.addWidget(self.time_heatmap)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -281,28 +287,24 @@ class DevMetricsApp(QMainWindow):
         month = self.month_selector.currentIndex() + 1
         year = int(self.year_selector.currentText()) if self.year_selector.currentText() else datetime.now().year
         try:
-            metrics_text, days, hours, weekend_days = update_opening_hours(project_path, month, year)
+            metrics_text, days, hours, weekend_days, heatmap_data = update_opening_hours(project_path, month, year)
             self.time_metrics.setText(metrics_text)
 
+            # Гистограмма
             self.time_histogram.axes.clear()
-            if days and hours:
-                # Получаем норму часов в день
+            if days and any(hours):  # Проверяем, есть ли ненулевые часы
                 hours_per_day = self.work_schedule_panel.get_hours_per_day()
-                # Определяем цвета: оранжевый для переработки, синий для рабочих, красный для выходных
                 colors = []
                 for i, day in enumerate(days):
                     if day in weekend_days:
                         colors.append('red')
                     elif hours[i] > hours_per_day:
-                        colors.append('orange')  # Переработка
+                        colors.append('orange')
                     else:
                         colors.append('blue')
 
-                # Рисуем гистограмму
                 self.time_histogram.axes.bar(days, hours, color=colors)
                 self.time_histogram.axes.set_xticks(days)
-
-                # Устанавливаем цвет чисел на оси X
                 labels = [str(day) for day in days]
                 for i, label in enumerate(self.time_histogram.axes.get_xticklabels()):
                     label.set_color('red' if days[i] in weekend_days else 'blue')
@@ -312,16 +314,78 @@ class DevMetricsApp(QMainWindow):
                 self.time_histogram.axes.set_ylabel("Отработанные часы")
                 self.time_histogram.axes.set_title(
                     f"График отработанного времени ({self.month_selector.currentText()} {year})")
-
-                # Устанавливаем целые числа на оси Y
                 max_hours = max(int(np.ceil(max(hours, default=0))), int(hours_per_day))
                 self.time_histogram.axes.set_yticks(np.arange(0, max_hours + 1, 1))
+            else:
+                self.time_histogram.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12)
+                self.time_histogram.axes.set_xlabel("Дни месяца")
+                self.time_histogram.axes.set_ylabel("Отработанные часы")
+                self.time_histogram.axes.set_title(
+                    f"График отработанного времени ({self.month_selector.currentText()} {year})")
+
+            # Heatmap
+            try:
+                # Пересоздаём оси для полного сброса
+                self.time_heatmap.figure.clear()
+                self.time_heatmap.axes = self.time_heatmap.figure.add_subplot(111)
+                self.time_heatmap.figure.set_size_inches(8, 4)  # Фиксируем размер фигуры
+                if hasattr(self.time_heatmap, 'colorbar') and self.time_heatmap.colorbar:
+                    try:
+                        self.time_heatmap.colorbar.remove()
+                    except:
+                        pass
+                    self.time_heatmap.colorbar = None
+                if heatmap_data.any():
+                    # Увеличиваем нижний отступ для меток часов
+                    self.time_heatmap.axes.set_position([0.1, 0.25, 0.7, 0.65])  # [left, bottom, width, height]
+                    sns.heatmap(heatmap_data, ax=self.time_heatmap.axes, cmap="YlOrRd",
+                                xticklabels=[f"{i}:00" for i in range(24)],  # Все 24 часа
+                                yticklabels=["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
+                                cbar_kws={'label': 'Количество коммитов', 'shrink': 0.8, 'pad': 0.05})
+                    self.time_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)")
+                    self.time_heatmap.axes.set_xlabel("Часы")
+                    self.time_heatmap.axes.set_ylabel("Дни недели")
+                    # Настраиваем метки
+                    self.time_heatmap.axes.tick_params(axis='x', labelsize=8, rotation=90)
+                    self.time_heatmap.axes.tick_params(axis='y', labelsize=10)
+                    self.time_heatmap.colorbar = self.time_heatmap.axes.collections[0].colorbar
+                else:
+                    self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])  # Без colorbar больше места
+                    self.time_heatmap.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12)
+                    self.time_heatmap.axes.set_xlabel("Часы")
+                    self.time_heatmap.axes.set_ylabel("Дни недели")
+                    self.time_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)")
+            except Exception as e:
+                self.time_heatmap.figure.clear()
+                self.time_heatmap.axes = self.time_heatmap.figure.add_subplot(111)
+                self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])
+                self.time_heatmap.axes.text(0.5, 0.5, f"Ошибка heatmap: {str(e)}", ha='center', va='center', fontsize=12)
+                if hasattr(self.time_heatmap, 'colorbar') and self.time_heatmap.colorbar:
+                    try:
+                        self.time_heatmap.colorbar.remove()
+                    except:
+                        pass
+                    self.time_heatmap.colorbar = None
 
             self.time_histogram.draw()
+            self.time_heatmap.draw()
+
         except Exception as e:
             self.time_metrics.setText(f"Ошибка: {str(e)}")
             self.time_histogram.axes.clear()
+            self.time_histogram.axes.text(0.5, 0.5, "Ошибка данных", ha='center', va='center', fontsize=12)
             self.time_histogram.draw()
+            self.time_heatmap.figure.clear()
+            self.time_heatmap.axes = self.time_heatmap.figure.add_subplot(111)
+            self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])
+            self.time_heatmap.axes.text(0.5, 0.5, "Ошибка данных", ha='center', va='center', fontsize=12)
+            if hasattr(self.time_heatmap, 'colorbar') and self.time_heatmap.colorbar:
+                try:
+                    self.time_heatmap.colorbar.remove()
+                except:
+                    pass
+                self.time_heatmap.colorbar = None
+            self.time_heatmap.draw()
 
     def update_code_analysis(self):
         project_path = self.settings_panel.project_path_input.text()
@@ -348,16 +412,16 @@ class DevMetricsApp(QMainWindow):
             self.trend_graph.draw()
         except Exception as e:
             self.trend_graph.axes.clear()
+            self.trend_graph.axes.text(0.5, 0.5, f"Ошибка: {str(e)}", ha='center', va='center', fontsize=12)
             self.trend_graph.draw()
-
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
+        fig = Figure(figsize=(width, height), dpi=100)
         self.axes = fig.add_subplot(111)
+        self.colorbar = None
         super().__init__(fig)
         self.setParent(parent)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
