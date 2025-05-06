@@ -24,7 +24,7 @@ def update_opening_hours(project_path, month, year, max_count=10000):
         dead_time_periods = []
         commits_per_hour = []
         hour_counts = [0] * 24
-        heatmap_data = np.zeros((7, 24))  # Дни недели (0-6) x часы (0-23)
+        heatmap_data = np.zeros((days_in_month, 24))  # Дни месяца x часы (0-23)
 
         # Собираем коммиты по дням
         for commit in commits:
@@ -34,9 +34,8 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                 day_commits[day].append(commit_time)
                 total_commits += 1
                 hour = commit_time.hour
-                weekday = commit_time.weekday()
                 hour_counts[hour] += 1
-                heatmap_data[weekday, hour] += 1
+                heatmap_data[day - 1, hour] += 1  # Индекс дня начинается с 0
                 if 23 <= hour or hour < 6:
                     night_commits += 1
 
@@ -120,10 +119,12 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                 f"Соответствие расписанию: {schedule_compliance:.2f}%"
             )
 
-        return metrics_text, days, hours, weekend_days, heatmap_data
+        month_days = days  # Список дней месяца (1–31)
+        return metrics_text, days, hours, weekend_days, heatmap_data, month_days
 
     except Exception as e:
-        return f"Ошибка при анализе репозитория: {str(e)}", [], [], [], np.zeros((7, 24))
+        days_in_month = calendar.monthrange(year, month)[1]
+        return f"Ошибка при анализе репозитория: {str(e)}", [], [], [], np.zeros((days_in_month, 24)), []
 
 def get_years(project_path):
     try:

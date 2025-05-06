@@ -287,7 +287,7 @@ class DevMetricsApp(QMainWindow):
         month = self.month_selector.currentIndex() + 1
         year = int(self.year_selector.currentText()) if self.year_selector.currentText() else datetime.now().year
         try:
-            metrics_text, days, hours, weekend_days, heatmap_data = update_opening_hours(project_path, month, year)
+            metrics_text, days, hours, weekend_days, heatmap_data, month_days = update_opening_hours(project_path, month, year)
             self.time_metrics.setText(metrics_text)
 
             # Гистограмма
@@ -337,28 +337,28 @@ class DevMetricsApp(QMainWindow):
                     self.time_heatmap.colorbar = None
                 if heatmap_data.any():
                     # Увеличиваем нижний отступ для меток часов
-                    self.time_heatmap.axes.set_position([0.1, 0.25, 0.7, 0.65])  # [left, bottom, width, height]
+                    self.time_heatmap.axes.set_position([0.1, 0.35, 0.7, 0.55])  # [left, bottom, width, height]
                     sns.heatmap(heatmap_data, ax=self.time_heatmap.axes, cmap="YlOrRd",
-                                xticklabels=[f"{i}:00" for i in range(24)],  # Все 24 часа
-                                yticklabels=["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
+                                xticklabels=[f"{i}:00" for i in range(0, 24, 3)],  # Каждые 3 часа
+                                yticklabels=[str(day) for day in month_days],  # Дни месяца
                                 cbar_kws={'label': 'Количество коммитов', 'shrink': 0.8, 'pad': 0.05})
                     self.time_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)")
                     self.time_heatmap.axes.set_xlabel("Часы")
-                    self.time_heatmap.axes.set_ylabel("Дни недели")
+                    self.time_heatmap.axes.set_ylabel("Дни месяца")
                     # Настраиваем метки
-                    self.time_heatmap.axes.tick_params(axis='x', labelsize=8, rotation=90)
-                    self.time_heatmap.axes.tick_params(axis='y', labelsize=10)
+                    self.time_heatmap.axes.tick_params(axis='x', labelsize=6, rotation=90)
+                    self.time_heatmap.axes.tick_params(axis='y', labelsize=8)
                     self.time_heatmap.colorbar = self.time_heatmap.axes.collections[0].colorbar
                 else:
-                    self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])  # Без colorbar больше места
+                    self.time_heatmap.axes.set_position([0.1, 0.35, 0.8, 0.55])  # Без colorbar больше места
                     self.time_heatmap.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12)
                     self.time_heatmap.axes.set_xlabel("Часы")
-                    self.time_heatmap.axes.set_ylabel("Дни недели")
+                    self.time_heatmap.axes.set_ylabel("Дни месяца")
                     self.time_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)")
             except Exception as e:
                 self.time_heatmap.figure.clear()
                 self.time_heatmap.axes = self.time_heatmap.figure.add_subplot(111)
-                self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])
+                self.time_heatmap.axes.set_position([0.1, 0.35, 0.8, 0.55])
                 self.time_heatmap.axes.text(0.5, 0.5, f"Ошибка heatmap: {str(e)}", ha='center', va='center', fontsize=12)
                 if hasattr(self.time_heatmap, 'colorbar') and self.time_heatmap.colorbar:
                     try:
@@ -377,7 +377,7 @@ class DevMetricsApp(QMainWindow):
             self.time_histogram.draw()
             self.time_heatmap.figure.clear()
             self.time_heatmap.axes = self.time_heatmap.figure.add_subplot(111)
-            self.time_heatmap.axes.set_position([0.1, 0.25, 0.8, 0.65])
+            self.time_heatmap.axes.set_position([0.1, 0.35, 0.8, 0.55])
             self.time_heatmap.axes.text(0.5, 0.5, "Ошибка данных", ha='center', va='center', fontsize=12)
             if hasattr(self.time_heatmap, 'colorbar') and self.time_heatmap.colorbar:
                 try:
