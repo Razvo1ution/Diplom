@@ -10,7 +10,8 @@ class SettingsPanel(QWidget):
         self.parent = parent
         self.themes = {
             "Светлая": self.light_theme,
-            "Темная": self.dark_theme
+            "Темная": self.dark_theme,
+            "Темный контраст": self.contrast_dark_theme  # Добавляем новую тему
         }
         self.init_ui()
 
@@ -98,6 +99,18 @@ class SettingsPanel(QWidget):
         palette.setColor(QPalette.Button, QColor(53, 53, 53))
         palette.setColor(QPalette.ButtonText, Qt.white)
         palette.setColor(QPalette.Highlight, QColor(142, 45, 197).lighter())
+        return palette
+
+    def contrast_dark_theme(self):
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(0, 0, 0))  # Чёрный фон
+        palette.setColor(QPalette.WindowText, QColor(107, 142, 35))  # olivedrab
+        palette.setColor(QPalette.Base, QColor(20, 20, 20))  # Тёмный фон с лёгким серым оттенком
+        palette.setColor(QPalette.Text, QColor(107, 142, 35))  # olivedrab
+        palette.setColor(QPalette.Button, QColor(50, 50, 50))  # Контрастная кнопка
+        palette.setColor(QPalette.ButtonText, QColor(107, 142, 35))  # olivedrab на кнопках
+        palette.setColor(QPalette.Highlight, QColor(107, 142, 35))  # Выделение в olivedrab
+        palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))  # Текст выделения чёрный
         return palette
 
     def apply_theme(self, palette_func):
