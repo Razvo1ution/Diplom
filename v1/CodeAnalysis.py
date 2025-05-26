@@ -1,76 +1,95 @@
 import os
-from git import Repo
-from git.exc import InvalidGitRepositoryError
-from radon.complexity import cc_visit
-from PyQt5.QtWidgets import QApplication
+import git
+from git.exc import GitCommandError, InvalidGitRepositoryError
+from PyQt5.QtWidgets import QProgressBar
+import logging
 
-def get_project_files(project_path):
-    files = []
-    for root, _, filenames in os.walk(project_path):
-        for filename in filenames:
-            if filename.endswith(('.py', '.js', '.java', '.cs', '.cpp', '.h', '.go', '.rs', '.kt', '.swift',
-                                  '.json', '.yaml', '.yml', '.toml', '.env', 'Dockerfile', '.dockerignore',
-                                  '.md', '.rst', 'README.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md',
-                                  'CODESTYLE.md', 'package.json', 'requirements.txt', 'pom.xml', 'build.gradle',
-                                  'Cargo.toml', '.csproj', '.sln', '.css', '.scss', '.png', '.jpg', '.svg', '.html')):
-                files.append(os.path.join(root, filename))
-    return files
+# Настройка логирования
+logging.basicConfig(filename='devmetrics.log', level=logging.ERROR,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-def update_code_analysis(project_path, progress_bar):
-    if not project_path or not os.path.exists(project_path):
-        return "Укажите путь к проекту в настройках"
-
-    if not os.path.exists(os.path.join(project_path, '.git')):
-        return "Ошибка: Указанная папка не является Git-репозиторием"
-
+def update_code_analysis(project_path, progress_bar=None, author=None):
     try:
-        repo = Repo(project_path)
-        commits = list(repo.iter_commits(max_count=100))
-        added_lines = 0
-        deleted_lines = 0
-        hotspots = {}
-        python_files = [f for f in get_project_files(project_path) if f.endswith('.py')]
+        if not project_path or not os.path.exists(project_path):
+            return "Ошибка: Указан неверный путь к проекту"
 
-        for commit in commits:
-            diff = commit.stats.total
-            added_lines += diff['insertions']
-            deleted_lines += diff['deletions']
-            for file in commit.stats.files:
-                hotspots[file] = hotspots.get(file, 0) + 1
+        repo = git.Repo(project_path)
+        if progress_bar:
+            progress_bar.setVisible(True)
+            progress_bar.setMaximum(100)
+            progress_bar.setValue(0)
 
-        total_cc = 0
-        complex_files = []
-        progress_bar.setVisible(True)
-        progress_bar.setMaximum(len(python_files) if python_files else 1)
-        for i, file in enumerate(python_files):
-            try:
-                with open(file, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                cc_results = cc_visit(code)
-                file_cc = sum(block.complexity for block in cc_results)
-                total_cc += file_cc
-                if file_cc > 10:
-                    complex_files.append((file, file_cc))
-            except (SyntaxError, UnicodeDecodeError):
+        # Получаем все коммиты для указанного автора
+        commits = list(repo.iter_commits(max_count=10000, author=author))
+        if not commits:
+            return "Нет данных для анализа кода"
+
+        total_commits = len(commits)
+        if progress_bar:
+            progress_bar.setMaximum(total_commits)
+
+        code_metrics = {
+            'total_files_changed': 0,
+            'total_lines_added': 0,
+            'total_lines_removed': 0,
+            'files_by_extension': {}
+        }
+
+        for idx, commit in enumerate(commits):
+            if progress_bar:
+                progress_bar.setValue(idx + 1)
+
+            parent = commit.parents[0] if commit.parents else None
+            if not parent:
                 continue
-            progress_bar.setValue(i + 1)
-            QApplication.processEvents()
 
-        progress_bar.setVisible(False)
-        avg_cc = total_cc / len(python_files) if python_files else 0
-        hotspots_text = "\n".join(f"{file}: {count} изменений" for file, count in sorted(hotspots.items(), key=lambda x: x[1], reverse=True)[:5])
+            diff_stat = repo.git.diff(commit.hexsha + '^', commit.hexsha, numstat=True)
+            for line in diff_stat.splitlines():
+                if not line.strip():
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) != 3:
+                    continue
+
+                added, removed, file_path = parts
+                if any(excluded in file_path for excluded in ['venv', '.idea']):
+                    continue
+
+                if added == '-' or removed == '-':
+                    continue
+
+                added = int(added)
+                removed = int(removed)
+
+                code_metrics['total_files_changed'] += 1
+                code_metrics['total_lines_added'] += added
+                code_metrics['total_lines_removed'] += removed
+
+                _, ext = os.path.splitext(file_path)
+                ext = ext[1:] if ext else 'unknown'
+                code_metrics['files_by_extension'][ext] = code_metrics['files_by_extension'].get(ext, 0) + 1
+
+        if code_metrics['total_files_changed'] == 0:
+            return "Нет изменений в рабочих файлах"
 
         metrics_text = (
-            f"Добавлено строк: {added_lines}\n"
-            f"Удалено строк: {deleted_lines}\n"
-            f"Средняя цикломатическая сложность: {avg_cc:.2f}\n"
-            f"Сложные файлы:\n" + "\n".join(f"{file}: {cc}" for file, cc in complex_files[:5]) + "\n"
-            f"Часто изменяемые файлы:\n{hotspots_text}\n"
-            f"Рекомендации: Проверить файлы с высокой сложностью для рефакторинга."
+            f"Общее количество изменённых файлов: {code_metrics['total_files_changed']}\n"
+            f"Добавлено строк: {code_metrics['total_lines_added']}\n"
+            f"Удалено строк: {code_metrics['total_lines_removed']}\n"
+            f"Распределение по расширениям: {dict(sorted(code_metrics['files_by_extension'].items()))}"
         )
-        return metrics_text
+        return metrics_text if author else code_metrics
 
     except InvalidGitRepositoryError:
+        logging.error(f"Invalid Git repository: {project_path}")
         return "Ошибка: Указанная папка не является Git-репозиторием"
+    except GitCommandError as e:
+        logging.error(f"Git command error: {str(e)}")
+        return f"Ошибка анализа кода: {str(e)}"
     except Exception as e:
-        return f"Ошибка при анализе кода: {str(e)}"
+        logging.error(f"Error in update_code_analysis: {str(e)}")
+        return f"Ошибка анализа кода: {str(e)}"
+    finally:
+        if progress_bar:
+            progress_bar.setVisible(False)

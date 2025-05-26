@@ -11,7 +11,6 @@ import logging
 logging.basicConfig(filename='devmetrics.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 def format_time(hours):
     """Форматирует время из X.XXч в Xч или Xч Yмин."""
     if hours == 0:
@@ -24,12 +23,11 @@ def format_time(hours):
         minutes = int(frac_part * 60)
         return f"{int_part}ч {minutes}мин"
 
-
-def update_opening_hours(project_path, month, year, max_count=10000):
+def update_opening_hours(project_path, month, year, max_count=10000, author=None):
     try:
         repo = git.Repo(project_path)
         try:
-            commits = list(repo.iter_commits(max_count=max_count))
+            commits = list(repo.iter_commits(max_count=max_count, author=author))
         except GitCommandError as e:
             logging.error(f"Git command error while fetching commits: {str(e)}")
             raise Exception(f"Ошибка Git при получении коммитов: {str(e)}")
@@ -46,22 +44,19 @@ def update_opening_hours(project_path, month, year, max_count=10000):
         total_commits = 0
         night_commits = 0
         commit_intervals = []
-        commits_per_hour = []
         hour_counts = [0] * 24
         heatmap_data = np.zeros((days_in_month, 8))
 
-        # Словарь для хранения дневных метрик
         daily_metrics = {day: {
-            'work_period': None,  # Период времени работы (начало, конец)
-            'total_time': 0,  # Общее время в часах
-            'dead_periods': [],  # Список мёртвых периодов (начало, конец)
+            'work_period': None,
+            'total_time': 0,
+            'dead_periods': [],
             'commits': 0,
             'night_commits': 0,
             'dead_time': 0
         } for day in days}
 
-        # Собираем коммиты по дням
-        logging.debug(f"Processing commits for month {month}, year {year}")
+        logging.debug(f"Processing commits for month {month}, year {year}, author {author or 'all'}")
         for commit in commits:
             commit_time = datetime.fromtimestamp(commit.committed_date)
             if commit_time.year == year and commit_time.month == month:
@@ -76,7 +71,6 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                     night_commits += 1
                     daily_metrics[day]['night_commits'] += 1
 
-        # Подсчёт метрик
         for day in days:
             if day not in schedule or not schedule[day]:
                 weekend_days.append(day)
@@ -84,7 +78,7 @@ def update_opening_hours(project_path, month, year, max_count=10000):
             daily_metrics[day]['commits'] = len(commits)
             if commits:
                 active_days += 1
-                commits.sort()  # Сортировка по времени
+                commits.sort()
                 start_time = commits[0]
                 end_time = commits[-1]
                 day_hours = (end_time - start_time).total_seconds() / 3600
@@ -92,23 +86,19 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                 daily_metrics[day]['work_period'] = (start_time, end_time)
                 daily_metrics[day]['total_time'] = day_hours
 
-                # Средний интервал между коммитами
                 if len(commits) > 1:
                     intervals = [(commits[i + 1] - commits[i]).total_seconds() / 60 for i in range(len(commits) - 1)]
                     commit_intervals.extend(intervals)
 
-                # Мёртвые периоды (в рабочие часы)
                 if day not in weekend_days:
                     work_start_time = datetime(year, month, day, work_start.hour, work_start.minute)
                     work_end_time = datetime(year, month, day, work_end.hour, work_end.minute)
                     current_time = work_start_time
-                    commit_index = 0  # Индекс для перебора коммитов
+                    commit_index = 0
                     while current_time < work_end_time:
-                        # Ищем следующий коммит после current_time
                         while commit_index < len(commits) and commits[commit_index] < current_time:
                             commit_index += 1
                         if commit_index >= len(commits):
-                            # Нет больше коммитов — весь оставшийся период мёртвый
                             if current_time < work_end_time:
                                 daily_metrics[day]['dead_periods'].append((current_time, work_end_time))
                             break
@@ -123,7 +113,6 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                             current_time = next_commit
                             commit_index += 1
 
-        # Расчёт мёртвого времени по дням
         for day in days:
             if day not in weekend_days:
                 total_day_work_hours = (work_end.hour - work_start.hour)
@@ -132,11 +121,9 @@ def update_opening_hours(project_path, month, year, max_count=10000):
                 daily_metrics[day]['dead_time'] = (
                             day_dead_time / total_day_work_hours * 100) if total_day_work_hours > 0 else 0
 
-        # Коммиты в час
         active_hours = sum(1 for count in hour_counts if count > 0)
         commits_per_hour_avg = total_commits / active_hours if active_hours > 0 else 0
 
-        # Пиковые часы активности
         peak_hours = []
         for i in range(0, 24, 2):
             count = sum(hour_counts[i:i + 2])
@@ -145,13 +132,10 @@ def update_opening_hours(project_path, month, year, max_count=10000):
         peak_hours.sort(key=lambda x: x[1], reverse=True)
         peak_hours_text = peak_hours[0][0] if peak_hours else "Нет данных"
 
-        # Ночные коммиты
         night_commit_ratio = (night_commits / total_commits * 100) if total_commits > 0 else 0
 
-        # Средний интервал между коммитами
         avg_commit_interval = sum(commit_intervals) / len(commit_intervals) if commit_intervals else 0
 
-        # Мёртвое время (общее)
         workdays = [day for day in days if day not in weekend_days]
         total_work_hours = sum((work_end.hour - work_start.hour) for day in workdays)
         dead_time_hours = sum(
@@ -159,12 +143,10 @@ def update_opening_hours(project_path, month, year, max_count=10000):
             workdays)
         dead_time_percent = (dead_time_hours / total_work_hours * 100) if total_work_hours > 0 else 0
 
-        # Соответствие расписанию
         workday_hours = sum(h for i, h in enumerate(hours) if days[i] in workdays)
         expected_hours = len(workdays) * hours_per_day
         schedule_compliance = (workday_hours / expected_hours * 100) if expected_hours > 0 else 0
 
-        # Формируем текст метрик с новым форматированием времени
         total_hours = sum(hours)
         overtime = sum(max(0, h - hours_per_day) for i, h in enumerate(hours) if days[i] in workdays)
         if total_commits == 0:
@@ -185,7 +167,7 @@ def update_opening_hours(project_path, month, year, max_count=10000):
             )
 
         month_days = days
-        logging.debug(f"Completed processing for month {month}, year {year}")
+        logging.debug(f"Completed processing for month {month}, year {year}, author {author or 'all'}")
         return metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics
 
     except InvalidGitRepositoryError:
@@ -195,7 +177,6 @@ def update_opening_hours(project_path, month, year, max_count=10000):
         logging.error(f"Error in update_opening_hours: {str(e)}")
         days_in_month = calendar.monthrange(year, month)[1]
         return f"Ошибка при анализе репозитория: {str(e)}", [], [], [], np.zeros((days_in_month, 8)), [], {}
-
 
 def get_years(project_path):
     try:

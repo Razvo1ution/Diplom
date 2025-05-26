@@ -41,6 +41,15 @@ class DevMetricsApp(QMainWindow):
             'month_days': [],
             'daily_metrics': {}
         }
+        self.chart_time_data = {
+            'metrics_text': '',
+            'days': [],
+            'hours': [],
+            'weekend_days': [],
+            'heatmap_data': np.array([]),
+            'month_days': [],
+            'daily_metrics': {}
+        }
         self.init_ui()
 
     def init_ui(self):
@@ -155,6 +164,23 @@ class DevMetricsApp(QMainWindow):
         self.dash_heatmap = MplCanvas(self, width=8, height=3, dpi=100)
         graph_layout.addWidget(QLabel("Heatmap активности:"))
         graph_layout.addWidget(self.dash_heatmap)
+
+        # Контролы для выбора года и месяца
+        charts_controls_layout = QHBoxLayout()
+        charts_controls_layout.addWidget(QLabel("Месяц:"))
+        self.month_selector_charts = QComboBox()
+        self.month_selector_charts.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                             "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.month_selector_charts.currentIndexChanged.connect(self.update_charts)
+        charts_controls_layout.addWidget(self.month_selector_charts)
+
+        charts_controls_layout.addWidget(QLabel("Год:"))
+        self.year_selector_charts = QComboBox()
+        self.year_selector_charts.currentTextChanged.connect(self.update_charts)
+        charts_controls_layout.addWidget(self.year_selector_charts)
+
+        charts_controls_layout.addStretch()
+        graph_layout.addLayout(charts_controls_layout)
 
         self.tabs.addTab(graph_tab, "Графики")
 
@@ -281,8 +307,9 @@ class DevMetricsApp(QMainWindow):
 
         self.update_years()
         self.update_opening_hours()
-        self.update_code_analysis()
+        self.update_years_charts()
         self.update_charts()
+        self.update_code_analysis()
         self.start_file_watcher(project_path)
 
     def closeEvent(self, event):
@@ -316,6 +343,20 @@ class DevMetricsApp(QMainWindow):
             logging.error(f"Error in update_years: {str(e)}")
             self.year_selector.clear()
             self.year_selector.addItems([str(datetime.now().year)])
+
+    def update_years_charts(self):
+        project_path = self.settings_panel.project_path_input.text()
+        try:
+            years = get_years(project_path)
+            self.year_selector_charts.clear()
+            self.year_selector_charts.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.year_selector_charts.setCurrentText(current_year)
+        except Exception as e:
+            logging.error(f"Error in update_years_charts: {str(e)}")
+            self.year_selector_charts.clear()
+            self.year_selector_charts.addItems([str(datetime.now().year)])
 
     def update_opening_hours(self):
         project_path = self.settings_panel.project_path_input.text()
@@ -417,12 +458,33 @@ class DevMetricsApp(QMainWindow):
 
     def update_charts(self):
         project_path = self.settings_panel.project_path_input.text()
+        month = self.month_selector_charts.currentIndex() + 1
+        year = int(self.year_selector_charts.currentText()) if self.year_selector_charts.currentText() else datetime.now().year
         try:
+            metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics = update_opening_hours(project_path, month, year)
+            self.chart_time_data = {
+                'metrics_text': metrics_text,
+                'days': days,
+                'hours': hours,
+                'weekend_days': weekend_days,
+                'heatmap_data': heatmap_data,
+                'month_days': month_days,
+                'daily_metrics': daily_metrics
+            }
             weeks, commits_per_week = update_charts(project_path)
             self.chart_data = {'weeks': weeks, 'commits_per_week': commits_per_week}
             self.update_dashboard()
         except Exception as e:
             logging.error(f"Error in update_charts: {str(e)}")
+            self.chart_time_data = {
+                'metrics_text': '',
+                'days': [],
+                'hours': [],
+                'weekend_days': [],
+                'heatmap_data': np.array([]),
+                'month_days': [],
+                'daily_metrics': {}
+            }
             self.chart_data = {'weeks': 0, 'commits_per_week': []}
             self.update_dashboard()
 
@@ -437,12 +499,12 @@ class DevMetricsApp(QMainWindow):
             grid_color = 'gray'
         elif theme == "Темная":
             text_color = 'white'
-            bg_color = '#353535'  # Цвет фона тёмной темы
+            bg_color = '#353535'
             grid_color = 'lightgray'
         else:  # Темный контраст
-            text_color = '#6B8E23'  # olivedrab в hex
-            bg_color = '#000000'  # Чёрный фон
-            grid_color = '#6B8E23'  # olivedrab для сетки
+            text_color = '#6B8E23'
+            bg_color = '#000000'
+            grid_color = '#6B8E23'
 
         # Тренд продуктивности
         self.trend_graph.axes.clear()
@@ -470,9 +532,9 @@ class DevMetricsApp(QMainWindow):
 
         # Гистограмма отработанного времени
         self.dash_histogram.axes.clear()
-        days = self.time_data['days']
-        hours = self.time_data['hours']
-        weekend_days = self.time_data['weekend_days']
+        days = self.chart_time_data['days']
+        hours = self.chart_time_data['hours']
+        weekend_days = self.chart_time_data['weekend_days']
         if days and any(hours):
             hours_per_day = self.work_schedule_panel.get_hours_per_day()
             colors = []
@@ -492,8 +554,8 @@ class DevMetricsApp(QMainWindow):
             self.dash_histogram.axes.set_xticklabels(labels, color=text_color)
             self.dash_histogram.axes.set_xlabel("Дни месяца", color=text_color)
             self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
-            month = self.month_selector.currentText()
-            year = self.year_selector.currentText() or str(datetime.now().year)
+            month = self.month_selector_charts.currentText()
+            year = self.year_selector_charts.currentText() or str(datetime.now().year)
             self.dash_histogram.axes.set_title(f"График отработанного времени ({month} {year})", color=text_color)
             self.dash_histogram.axes.set_facecolor(bg_color)
             self.dash_histogram.figure.set_facecolor(bg_color)
@@ -520,8 +582,8 @@ class DevMetricsApp(QMainWindow):
             except:
                 pass
             self.dash_heatmap.colorbar = None
-        heatmap_data = self.time_data['heatmap_data']
-        month_days = self.time_data['month_days']
+        heatmap_data = self.chart_time_data['heatmap_data']
+        month_days = self.chart_time_data['month_days']
         if heatmap_data.size > 0 and heatmap_data.any():
             self.dash_heatmap.axes.set_position([0.1, 0.4, 0.7, 0.5])
             sns.heatmap(heatmap_data, ax=self.dash_heatmap.axes, cmap="YlOrRd",
