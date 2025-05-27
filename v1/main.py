@@ -13,6 +13,7 @@ from CodeAnalysis import update_code_analysis
 from Charts import update_charts
 from file_watcher import start_file_watcher
 from WorkSchedule import WorkSchedulePanel
+from gigachat_integration import GigaChatPanel
 from datetime import datetime
 import numpy as np
 import calendar
@@ -63,6 +64,7 @@ class DevMetricsApp(QMainWindow):
         self.create_top_panel()
         self.create_settings_panel()
         self.create_work_schedule_panel()
+        self.create_gigachat_panel()
         self.create_tabs()
         self.create_menu_panel()
 
@@ -92,6 +94,7 @@ class DevMetricsApp(QMainWindow):
         self.create_opening_hours_tab()
         self.create_code_analysis_tab()
         self.create_charts_tab()
+        self.create_gigachat_tab()
         self.main_layout.addWidget(self.tabs)
 
     def create_opening_hours_tab(self):
@@ -184,6 +187,9 @@ class DevMetricsApp(QMainWindow):
 
         self.tabs.addTab(graph_tab, "Графики")
 
+    def create_gigachat_tab(self):
+        self.tabs.addTab(self.gigachat_panel, "GigaChat")
+
     def create_menu_panel(self):
         self.menu_dock = QDockWidget()
         self.menu_dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
@@ -246,6 +252,13 @@ class DevMetricsApp(QMainWindow):
 
         self.work_schedule_widget.hide()
         self.main_layout.addWidget(self.work_schedule_widget)
+
+    def create_gigachat_panel(self):
+        self.gigachat_panel = GigaChatPanel(self)
+        api_key = self.settings.value("gigachat_api_key", "")
+        if api_key:
+            self.gigachat_panel.auth_key_input.setText(api_key)
+            self.gigachat_panel.initialize_gigachat()
 
     def toggle_menu(self):
         if self.menu_dock.isVisible():

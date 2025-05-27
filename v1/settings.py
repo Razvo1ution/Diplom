@@ -27,6 +27,12 @@ class SettingsPanel(QWidget):
         browse_btn.clicked.connect(self.browse_project)
         layout.addWidget(browse_btn)
 
+        layout.addWidget(QLabel("API ключ GigaChat:"))
+        self.gigachat_api_key = QLineEdit()
+        self.gigachat_api_key.setPlaceholderText("Введите API ключ GigaChat...")
+        self.gigachat_api_key.setEchoMode(QLineEdit.Password)  # Скрываем API ключ
+        layout.addWidget(self.gigachat_api_key)
+
         layout.addWidget(QLabel("Тема:"))
         self.theme_selector = QComboBox()
         self.theme_selector.addItems(self.themes.keys())
@@ -39,8 +45,21 @@ class SettingsPanel(QWidget):
 
         layout.addStretch()
 
+        # Загружаем сохраненные настройки
+        self.load_saved_settings()
+
+    def load_saved_settings(self):
+        self.project_path_input.setText(self.parent.settings.value("project_path", ""))
+        self.gigachat_api_key.setText(self.parent.settings.value("gigachat_api_key", ""))
+        theme = self.parent.settings.value("theme", "Светлая")
+        index = self.theme_selector.findText(theme)
+        if index >= 0:
+            self.theme_selector.setCurrentIndex(index)
+
     def apply_settings(self):
         project_path = self.project_path_input.text()
+        gigachat_api_key = self.gigachat_api_key.text()
+
         try:
             # Проверяем существование пути
             if project_path and not os.path.exists(project_path):
@@ -61,10 +80,15 @@ class SettingsPanel(QWidget):
             # Сохраняем настройки
             self.parent.settings.setValue("project_path", project_path)
             self.parent.settings.setValue("theme", self.theme_selector.currentText())
+            self.parent.settings.setValue("gigachat_api_key", gigachat_api_key)
             self.parent.settings.sync()
 
             # Применяем тему
             self.change_theme(self.theme_selector.currentText())
+
+            # Инициализируем GigaChat если есть API ключ
+            if gigachat_api_key and hasattr(self.parent, 'gigachat_panel'):
+                self.parent.gigachat_panel.initialize_client(gigachat_api_key)
 
             # Обновляем метрики и наблюдатель
             self.parent.update_opening_hours()
