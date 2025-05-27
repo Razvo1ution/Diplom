@@ -2,14 +2,15 @@ import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
                              QPushButton, QTabWidget, QHBoxLayout, QDockWidget,
-                             QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox)
-from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings
+                             QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox,
+                             QGroupBox, QListWidget, QTableWidget, QTableWidgetItem)
+from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QFont, QFontDatabase
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from settings import SettingsPanel
 from OpeningHours import update_opening_hours, get_years, format_time
-from CodeAnalysis import update_code_analysis
+from CodeAnalysis import update_code_analysis, get_repository_files
 from Charts import update_charts
 from file_watcher import start_file_watcher
 from WorkSchedule import WorkSchedulePanel
@@ -26,6 +27,70 @@ import logging
 logging.basicConfig(filename='devmetrics.log', level=logging.ERROR,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+class ActivityChart(FigureCanvas):
+    def __init__(self, parent=None, width=10, height=4):
+        self.fig = Figure(figsize=(width, height))
+        self.axes = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setParent(parent)
+
+    def update_chart(self, day, hourly_activity, work_start, work_end, lunch_start, lunch_end):
+        self.axes.clear()
+        hours = list(range(24))
+        activity = [int(hourly_activity[day][hour]) for hour in hours]  # Преобразуем в целые числа
+
+        # Создаем линейный график
+        self.axes.plot(hours, activity, '-o', color='blue', linewidth=2, markersize=6)
+
+        # Добавляем вертикальные линии для рабочего времени
+        if work_start and work_end:
+            self.axes.axvline(x=work_start.hour + work_start.minute/60, 
+                            color='green', linestyle='--', label='Начало работы')
+            self.axes.axvline(x=work_end.hour + work_end.minute/60, 
+                            color='red', linestyle='--', label='Конец работы')
+
+        # Добавляем вертикальные линии для обеда
+        if lunch_start and lunch_end:
+            self.axes.axvline(x=lunch_start.hour + lunch_start.minute/60, 
+                            color='orange', linestyle='--', label='Начало обеда')
+            self.axes.axvline(x=lunch_end.hour + lunch_end.minute/60, 
+                            color='orange', linestyle='--', label='Конец обеда')
+
+        # Закрашиваем области времени
+        if work_start and work_end:
+            work_start_time = work_start.hour + work_start.minute/60
+            work_end_time = work_end.hour + work_end.minute/60
+            lunch_start_time = lunch_start.hour + lunch_start.minute/60
+            lunch_end_time = lunch_end.hour + lunch_end.minute/60
+
+            # Закрашиваем рабочее время (до обеда)
+            self.axes.fill_between(hours, 0, max(activity), 
+                                 where=(np.array(hours) >= work_start_time) & 
+                                       (np.array(hours) <= lunch_start_time),
+                                 alpha=0.1, color='blue')
+            
+            # Закрашиваем рабочее время (после обеда)
+            self.axes.fill_between(hours, 0, max(activity),
+                                 where=(np.array(hours) >= lunch_end_time) & 
+                                       (np.array(hours) <= work_end_time),
+                                 alpha=0.1, color='blue')
+
+            # Закрашиваем время обеда
+            self.axes.fill_between(hours, 0, max(activity),
+                                 where=(np.array(hours) >= lunch_start_time) & 
+                                       (np.array(hours) <= lunch_end_time),
+                                 alpha=0.1, color='orange')
+
+        self.axes.set_xlabel('Часы')
+        self.axes.set_ylabel('Количество коммитов')
+        self.axes.set_title(f'Активность за день {day}')
+        self.axes.set_xticks(hours)
+        self.axes.set_yticks(np.arange(0, max(activity) + 1, 1))  # Целочисленные деления по оси Y
+        self.axes.legend()
+        self.axes.grid(True, linestyle='--', alpha=0.7)
+        self.fig.tight_layout()
+        self.draw()
+
 class DevMetricsApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -40,7 +105,12 @@ class DevMetricsApp(QMainWindow):
             'weekend_days': [],
             'heatmap_data': np.array([]),
             'month_days': [],
-            'daily_metrics': {}
+            'daily_metrics': {},
+            'hourly_activity': {},
+            'work_start': None,
+            'work_end': None,
+            'lunch_start': None,
+            'lunch_end': None
         }
         self.chart_time_data = {
             'metrics_text': '',
@@ -101,11 +171,18 @@ class DevMetricsApp(QMainWindow):
         self.time_tab = QWidget()
         time_layout = QVBoxLayout(self.time_tab)
 
-        time_layout.addWidget(QLabel("Время работы:"))
+        # Верхняя часть с метриками
+        top_section = QVBoxLayout()  # Изменено на вертикальное расположение
+
+        # Метрики
         self.time_metrics = QTextEdit()
         self.time_metrics.setReadOnly(True)
-        time_layout.addWidget(self.time_metrics)
+        top_section.addWidget(QLabel("Время работы:"))
+        top_section.addWidget(self.time_metrics)
 
+        time_layout.addLayout(top_section)
+
+        # Контролы выбора периода
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Месяц:"))
         self.month_selector = QComboBox()
@@ -127,11 +204,16 @@ class DevMetricsApp(QMainWindow):
         controls_layout.addStretch()
         time_layout.addLayout(controls_layout)
 
+        # Метрики за выбранный день
         time_layout.addWidget(QLabel("Метрики за выбранный день:"))
         self.day_metrics = QTextEdit()
         self.day_metrics.setReadOnly(True)
         self.day_metrics.setFixedHeight(150)
         time_layout.addWidget(self.day_metrics)
+
+        # График активности внизу
+        self.activity_chart = ActivityChart()
+        time_layout.addWidget(self.activity_chart)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -143,10 +225,67 @@ class DevMetricsApp(QMainWindow):
         code_tab = QWidget()
         code_layout = QVBoxLayout(code_tab)
 
-        code_layout.addWidget(QLabel("Анализ кода:"))
+        # Верхняя часть с выбором файлов
+        files_group = QGroupBox("Выбор файлов для анализа")
+        files_layout = QVBoxLayout()
+        
+        # Список файлов с возможностью множественного выбора
+        self.files_list = QListWidget()
+        self.files_list.setSelectionMode(QListWidget.MultiSelection)
+        files_layout.addWidget(self.files_list)
+        
+        files_group.setLayout(files_layout)
+        code_layout.addWidget(files_group)
+
+        # Группа с выбором даты
+        date_group = QGroupBox("Выбор даты")
+        date_layout = QHBoxLayout()
+
+        # Селекторы даты
+        date_layout.addWidget(QLabel("Год:"))
+        self.code_year_selector = QComboBox()
+        self.code_year_selector.currentTextChanged.connect(self.update_code_analysis_days)
+        date_layout.addWidget(self.code_year_selector)
+
+        date_layout.addWidget(QLabel("Месяц:"))
+        self.code_month_selector = QComboBox()
+        self.code_month_selector.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                         "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.code_month_selector.currentIndexChanged.connect(self.update_code_analysis_days)
+        date_layout.addWidget(self.code_month_selector)
+
+        date_layout.addWidget(QLabel("День:"))
+        self.code_day_selector = QComboBox()
+        date_layout.addWidget(self.code_day_selector)
+
+        date_group.setLayout(date_layout)
+        code_layout.addWidget(date_group)
+
+        # Кнопка анализа
+        analyze_btn = QPushButton("Анализировать")
+        analyze_btn.clicked.connect(self.trigger_code_analysis)
+        code_layout.addWidget(analyze_btn)
+
+        # Группа для отображения результатов анализа
+        results_group = QGroupBox("Результаты анализа")
+        results_layout = QVBoxLayout()
+
+        # Текстовое поле для отображения результатов по выбранным файлам
+        self.selected_files_metrics = QTextEdit()
+        self.selected_files_metrics.setReadOnly(True)
+        self.selected_files_metrics.setPlaceholderText("Выберите файлы и дату для анализа")
+        results_layout.addWidget(QLabel("Статистика по выбранным файлам:"))
+        results_layout.addWidget(self.selected_files_metrics)
+
+        # Текстовое поле для общей статистики
         self.code_metrics = QTextEdit()
         self.code_metrics.setReadOnly(True)
-        code_layout.addWidget(self.code_metrics)
+        self.code_metrics.setPlaceholderText("Общая статистика проекта")
+        results_layout.addWidget(QLabel("Общая статистика за все время:"))
+        results_layout.addWidget(self.code_metrics)
+
+        results_group.setLayout(results_layout)
+        code_layout.addWidget(results_group)
 
         self.tabs.addTab(code_tab, "Анализ кода")
 
@@ -318,6 +457,8 @@ class DevMetricsApp(QMainWindow):
         self.update_opening_hours()
         self.update_years_charts()
         self.update_charts()
+        self.update_code_analysis_years()
+        self.populate_files_list()
         self.update_code_analysis()
         self.start_file_watcher(project_path)
 
@@ -372,7 +513,10 @@ class DevMetricsApp(QMainWindow):
         month = self.month_selector.currentIndex() + 1
         year = int(self.year_selector.currentText()) if self.year_selector.currentText() else datetime.now().year
         try:
-            metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics = update_opening_hours(project_path, month, year)
+            (metrics_text, days, hours, weekend_days, heatmap_data, month_days, 
+             daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end) = update_opening_hours(
+                project_path, month, year)
+            
             self.time_data = {
                 'metrics_text': metrics_text,
                 'days': days,
@@ -380,7 +524,12 @@ class DevMetricsApp(QMainWindow):
                 'weekend_days': weekend_days,
                 'heatmap_data': heatmap_data,
                 'month_days': month_days,
-                'daily_metrics': daily_metrics
+                'daily_metrics': daily_metrics,
+                'hourly_activity': hourly_activity,
+                'work_start': work_start,
+                'work_end': work_end,
+                'lunch_start': lunch_start,
+                'lunch_end': lunch_end
             }
             self.time_metrics.setText(metrics_text)
 
@@ -404,7 +553,12 @@ class DevMetricsApp(QMainWindow):
                 'weekend_days': [],
                 'heatmap_data': np.array([]),
                 'month_days': [],
-                'daily_metrics': {}
+                'daily_metrics': {},
+                'hourly_activity': {},
+                'work_start': None,
+                'work_end': None,
+                'lunch_start': None,
+                'lunch_end': None
             }
             self.day_selector.clear()
             self.day_metrics.setText("Нет данных")
@@ -413,11 +567,15 @@ class DevMetricsApp(QMainWindow):
     def update_day_metrics(self):
         if not self.time_data['daily_metrics']:
             self.day_metrics.setText("Нет данных")
+            self.activity_chart.axes.clear()
+            self.activity_chart.draw()
             return
 
         selected_day_text = self.day_selector.currentText()
         if not selected_day_text:
             self.day_metrics.setText("Выберите день")
+            self.activity_chart.axes.clear()
+            self.activity_chart.draw()
             return
 
         selected_day = int(selected_day_text.split()[1])
@@ -425,6 +583,8 @@ class DevMetricsApp(QMainWindow):
 
         if selected_day not in daily_metrics:
             self.day_metrics.setText(f"Нет данных за День {selected_day}")
+            self.activity_chart.axes.clear()
+            self.activity_chart.draw()
             return
 
         day_data = daily_metrics[selected_day]
@@ -452,18 +612,133 @@ class DevMetricsApp(QMainWindow):
         )
         self.day_metrics.setText(metrics_text)
 
-    def update_code_analysis(self):
+        # Обновляем график активности
+        self.activity_chart.update_chart(
+            selected_day,
+            self.time_data['hourly_activity'],
+            self.time_data['work_start'],
+            self.time_data['work_end'],
+            self.time_data['lunch_start'],
+            self.time_data['lunch_end']
+        )
+
+    def update_code_analysis_years(self):
+        """Обновляет список лет в выпадающем списке для анализа кода"""
         project_path = self.settings_panel.project_path_input.text()
         try:
-            metrics_text = update_code_analysis(project_path, self.progress_bar)
-            if not metrics_text:
-                metrics_text = "Нет данных для анализа кода"
-            self.code_metrics.setText(metrics_text)
+            years = get_years(project_path)
+            self.code_year_selector.clear()
+            self.code_year_selector.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.code_year_selector.setCurrentText(current_year)
         except Exception as e:
-            logging.error(f"Error in update_code_analysis: {str(e)}")
-            self.code_metrics.setText(f"Ошибка анализа кода: {str(e)}")
-        finally:
-            self.progress_bar.setVisible(False)
+            logging.error(f"Error in update_code_analysis_years: {str(e)}")
+            self.code_year_selector.clear()
+            self.code_year_selector.addItems([str(datetime.now().year)])
+
+    def update_code_analysis_days(self):
+        """Обновляет список дней в зависимости от выбранного месяца и года"""
+        try:
+            year = int(self.code_year_selector.currentText())
+            month = self.code_month_selector.currentIndex() + 1
+            _, last_day = calendar.monthrange(year, month)
+            
+            self.code_day_selector.clear()
+            self.code_day_selector.addItems([str(day) for day in range(1, last_day + 1)])
+        except Exception as e:
+            logging.error(f"Error in update_code_analysis_days: {str(e)}")
+            self.code_day_selector.clear()
+
+    def populate_files_list(self):
+        """Заполняет список файлов из репозитория"""
+        project_path = self.settings_panel.project_path_input.text()
+        try:
+            files = get_repository_files(project_path)
+            self.files_list.clear()
+            for file in sorted(files):  # Сортируем файлы по алфавиту
+                self.files_list.addItem(file)
+        except Exception as e:
+            logging.error(f"Error in populate_files_list: {str(e)}")
+            self.files_list.clear()
+
+    def trigger_code_analysis(self):
+        """Запускает анализ кода с выбранными параметрами"""
+        selected_files = [item.text() for item in self.files_list.selectedItems()]
+        
+        try:
+            year = int(self.code_year_selector.currentText())
+            month = self.code_month_selector.currentIndex() + 1
+            day = int(self.code_day_selector.currentText())
+            
+            date_filter = {
+                'year': year,
+                'month': month,
+                'day': day
+            }
+        except Exception as e:
+            logging.error(f"Error preparing date filter: {str(e)}")
+            date_filter = None
+
+        self.update_code_analysis(selected_files=selected_files, date_filter=date_filter)
+
+    def update_code_analysis(self, selected_files=None, date_filter=None):
+        """Обновленный метод анализа кода с поддержкой фильтров"""
+        project_path = self.settings_panel.project_path_input.text()
+        if not project_path:
+            self.selected_files_metrics.setText("Ошибка: Проект не найден. Укажите путь в настройках.")
+            self.code_metrics.setText("Ошибка: Проект не найден. Укажите путь в настройках.")
+            return
+
+        self.progress_bar.setVisible(True)
+        analysis_result = update_code_analysis(project_path, self.progress_bar, 
+                                            author=None, 
+                                            selected_files=selected_files, 
+                                            date_filter=date_filter)
+        self.progress_bar.setVisible(False)
+
+        if analysis_result.get("error"):
+            self.selected_files_metrics.setText(analysis_result["error"])
+            self.code_metrics.setText(analysis_result["error"])
+            return
+
+        # Отображение статистики по выбранным файлам за конкретный день
+        if selected_files and date_filter and analysis_result.get("files_daily_stats"):
+            files_stats_text = "Статистика по выбранным файлам за {}.{}.{}:\n\n".format(
+                date_filter['day'], date_filter['month'], date_filter['year']
+            )
+            
+            # Статистика по каждому файлу
+            for file_path, stats in analysis_result["files_daily_stats"].items():
+                files_stats_text += f"Файл: {file_path}\n"
+                files_stats_text += f"  Добавлено строк: {stats['added']}\n"
+                files_stats_text += f"  Удалено строк: {stats['removed']}\n\n"
+
+            # Общая статистика по выбранным файлам за день
+            if analysis_result.get("selected_files_summary_today"):
+                summary = analysis_result["selected_files_summary_today"]
+                files_stats_text += "\nОбщая статистика по выбранным файлам за день:\n"
+                files_stats_text += f"Всего добавлено строк: {summary['total_lines_added']}\n"
+                files_stats_text += f"Всего удалено строк: {summary['total_lines_removed']}\n"
+            
+            self.selected_files_metrics.setText(files_stats_text)
+        else:
+            self.selected_files_metrics.setText(
+                "Выберите файлы и дату для просмотра детальной статистики"
+            )
+
+        # Отображение общей статистики за все время
+        if analysis_result.get("overall_metrics_all_time"):
+            all_time_metrics = analysis_result["overall_metrics_all_time"]
+            all_time_text = "Статистика за все время работы над проектом:\n\n"
+            all_time_text += f"Общее количество изменённых файлов: {all_time_metrics['total_files_changed']}\n"
+            all_time_text += f"Всего добавлено строк: {all_time_metrics['total_lines_added']}\n"
+            all_time_text += f"Всего удалено строк: {all_time_metrics['total_lines_removed']}\n"
+            all_time_text += f"Распределение по расширениям: {dict(sorted(all_time_metrics['files_by_extension'].items()))}\n"
+            
+            self.code_metrics.setText(all_time_text)
+        else:
+            self.code_metrics.setText("Нет данных об изменениях в проекте")
 
     def update_charts(self):
         project_path = self.settings_panel.project_path_input.text()

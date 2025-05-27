@@ -33,7 +33,7 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
             raise Exception(f"Ошибка Git при получении коммитов: {str(e)}")
 
         hours_per_day = get_hours_per_day()
-        work_start, work_end = get_work_hours()
+        work_start, work_end, lunch_start, lunch_end = get_work_hours()
         schedule = get_schedule(year, month)
         days_in_month = calendar.monthrange(year, month)[1]
         days = list(range(1, days_in_month + 1))
@@ -46,6 +46,9 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
         commit_intervals = []
         hour_counts = [0] * 24
         heatmap_data = np.zeros((days_in_month, 8))
+        
+        # Добавляем отслеживание почасовой активности для каждого дня
+        hourly_activity = {day: [0] * 24 for day in days}
 
         daily_metrics = {day: {
             'work_period': None,
@@ -53,7 +56,9 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
             'dead_periods': [],
             'commits': 0,
             'night_commits': 0,
-            'dead_time': 0
+            'dead_time': 0,
+            'lunch_period': (lunch_start, lunch_end),
+            'hourly_activity': [0] * 24  # Добавляем почасовую активность в метрики
         } for day in days}
 
         logging.debug(f"Processing commits for month {month}, year {year}, author {author or 'all'}")
@@ -61,10 +66,12 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
             commit_time = datetime.fromtimestamp(commit.committed_date)
             if commit_time.year == year and commit_time.month == month:
                 day = commit_time.day
+                hour = commit_time.hour
                 day_commits[day].append(commit_time)
                 total_commits += 1
-                hour = commit_time.hour
                 hour_counts[hour] += 1
+                hourly_activity[day][hour] += 1  # Увеличиваем счетчик для конкретного часа
+                daily_metrics[day]['hourly_activity'][hour] += 1  # Обновляем почасовую активность в метриках
                 interval_index = hour // 3
                 heatmap_data[day - 1, interval_index] += 1
                 if 23 <= hour or hour < 6:
@@ -93,33 +100,76 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
                 if day not in weekend_days:
                     work_start_time = datetime(year, month, day, work_start.hour, work_start.minute)
                     work_end_time = datetime(year, month, day, work_end.hour, work_end.minute)
+                    lunch_start_time = datetime(year, month, day, lunch_start.hour, lunch_start.minute)
+                    lunch_end_time = datetime(year, month, day, lunch_end.hour, lunch_end.minute)
+                    
                     current_time = work_start_time
                     commit_index = 0
+                    
                     while current_time < work_end_time:
+                        # Пропускаем время обеда
+                        if current_time >= lunch_start_time and current_time < lunch_end_time:
+                            current_time = lunch_end_time
+                            continue
+                            
                         while commit_index < len(commits) and commits[commit_index] < current_time:
                             commit_index += 1
+                            
                         if commit_index >= len(commits):
                             if current_time < work_end_time:
-                                daily_metrics[day]['dead_periods'].append((current_time, work_end_time))
+                                # Не учитываем обеденное время как мертвое время
+                                if current_time < lunch_start_time and work_end_time > lunch_end_time:
+                                    if lunch_start_time > current_time:
+                                        daily_metrics[day]['dead_periods'].append((current_time, lunch_start_time))
+                                    if work_end_time > lunch_end_time:
+                                        daily_metrics[day]['dead_periods'].append((lunch_end_time, work_end_time))
+                                else:
+                                    # Если текущее время после обеда или до него
+                                    end_time = work_end_time
+                                    if current_time < lunch_start_time and work_end_time > lunch_start_time:
+                                        end_time = lunch_start_time
+                                    elif current_time >= lunch_end_time:
+                                        end_time = work_end_time
+                                    daily_metrics[day]['dead_periods'].append((current_time, end_time))
                             break
-                        next_commit = commits[commit_index] if commit_index < len(commits) else None
-                        if not next_commit or (next_commit - current_time).total_seconds() / 3600 >= 2:
+                            
+                        next_commit = commits[commit_index]
+                        # Проверяем, не попадает ли следующий коммит в обеденное время
+                        if next_commit >= lunch_start_time and next_commit < lunch_end_time:
+                            if current_time < lunch_start_time:
+                                daily_metrics[day]['dead_periods'].append((current_time, lunch_start_time))
+                            current_time = lunch_end_time
+                            continue
+                            
+                        if (next_commit - current_time).total_seconds() / 3600 >= 2:
                             dead_end = min(current_time + timedelta(hours=2), work_end_time)
                             if next_commit and next_commit < dead_end:
                                 dead_end = next_commit
-                            daily_metrics[day]['dead_periods'].append((current_time, dead_end))
-                            current_time = dead_end
+                            # Проверяем, не пересекается ли мертвое время с обедом
+                            if dead_end > lunch_start_time and current_time < lunch_end_time:
+                                if current_time < lunch_start_time:
+                                    daily_metrics[day]['dead_periods'].append((current_time, lunch_start_time))
+                                current_time = lunch_end_time
+                            else:
+                                daily_metrics[day]['dead_periods'].append((current_time, dead_end))
+                                current_time = dead_end
                         else:
                             current_time = next_commit
                             commit_index += 1
 
         for day in days:
             if day not in weekend_days:
-                total_day_work_hours = (work_end.hour - work_start.hour)
+                # Вычисляем общее рабочее время с учетом обеда
+                total_work_minutes = ((work_end.hour - work_start.hour) * 60 + 
+                                   (work_end.minute - work_start.minute))
+                lunch_minutes = ((lunch_end.hour - lunch_start.hour) * 60 + 
+                               (lunch_end.minute - lunch_start.minute))
+                total_work_hours = (total_work_minutes - lunch_minutes) / 60
+                
                 day_dead_time = sum(
                     (end - start).total_seconds() / 3600 for start, end in daily_metrics[day]['dead_periods'])
                 daily_metrics[day]['dead_time'] = (
-                            day_dead_time / total_day_work_hours * 100) if total_day_work_hours > 0 else 0
+                    day_dead_time / total_work_hours * 100) if total_work_hours > 0 else 0
 
         active_hours = sum(1 for count in hour_counts if count > 0)
         commits_per_hour_avg = total_commits / active_hours if active_hours > 0 else 0
@@ -137,7 +187,13 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
         avg_commit_interval = sum(commit_intervals) / len(commit_intervals) if commit_intervals else 0
 
         workdays = [day for day in days if day not in weekend_days]
-        total_work_hours = sum((work_end.hour - work_start.hour) for day in workdays)
+        # Вычисляем общее рабочее время с учетом обеда для всех рабочих дней
+        total_work_minutes = ((work_end.hour - work_start.hour) * 60 + 
+                           (work_end.minute - work_start.minute))
+        lunch_minutes = ((lunch_end.hour - lunch_start.hour) * 60 + 
+                       (lunch_end.minute - lunch_start.minute))
+        total_work_hours = len(workdays) * (total_work_minutes - lunch_minutes) / 60
+        
         dead_time_hours = sum(
             sum((end - start).total_seconds() / 3600 for start, end in daily_metrics[day]['dead_periods']) for day in
             workdays)
@@ -168,15 +224,18 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
 
         month_days = days
         logging.debug(f"Completed processing for month {month}, year {year}, author {author or 'all'}")
-        return metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics
+        return metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end
 
     except InvalidGitRepositoryError:
         logging.error(f"Invalid Git repository: {project_path}")
-        return "Ошибка: Указанная папка не является Git-репозиторием", [], [], [], np.zeros((days_in_month, 8)), [], {}
+        empty_hourly = {day: [0] * 24 for day in range(1, days_in_month + 1)}
+        return ("Ошибка: Указанная папка не является Git-репозиторием", [], [], [], 
+                np.zeros((days_in_month, 8)), [], {}, empty_hourly, None, None, None, None)
     except Exception as e:
         logging.error(f"Error in update_opening_hours: {str(e)}")
-        days_in_month = calendar.monthrange(year, month)[1]
-        return f"Ошибка при анализе репозитория: {str(e)}", [], [], [], np.zeros((days_in_month, 8)), [], {}
+        empty_hourly = {day: [0] * 24 for day in range(1, days_in_month + 1)}
+        return (f"Ошибка при анализе репозитория: {str(e)}", [], [], [], 
+                np.zeros((days_in_month, 8)), [], {}, empty_hourly, None, None, None, None)
 
 def get_years(project_path):
     try:
@@ -186,3 +245,24 @@ def get_years(project_path):
         return sorted(years)
     except Exception:
         return [datetime.now().year]
+
+def get_work_hours():
+    work_hours_file = os.path.join(os.path.expanduser("~"), ".devmetrics_work_hours")
+    try:
+        if os.path.exists(work_hours_file):
+            with open(work_hours_file, 'r') as f:
+                work_hours = eval(f.read())
+                start = datetime.strptime(work_hours['start'], "%H:%M")
+                end = datetime.strptime(work_hours['end'], "%H:%M")
+                lunch_start = datetime.strptime(work_hours.get('lunch_start', "13:00"), "%H:%M")
+                lunch_end = datetime.strptime(work_hours.get('lunch_end', "14:00"), "%H:%M")
+                return start, end, lunch_start, lunch_end
+        return (datetime.strptime("09:00", "%H:%M"), 
+                datetime.strptime("17:00", "%H:%M"),
+                datetime.strptime("13:00", "%H:%M"),
+                datetime.strptime("14:00", "%H:%M"))
+    except:
+        return (datetime.strptime("09:00", "%H:%M"), 
+                datetime.strptime("17:00", "%H:%M"),
+                datetime.strptime("13:00", "%H:%M"),
+                datetime.strptime("14:00", "%H:%M"))

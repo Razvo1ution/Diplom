@@ -63,6 +63,7 @@ class SettingsPanel(QWidget):
                 QMessageBox.warning(self, "Ошибка", "Указанная папка не является Git-репозиторием")
                 self.parent.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
                 self.parent.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
+                self.parent.selected_files_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
                 self.parent.time_heatmap.axes.clear()
                 self.parent.time_heatmap.draw()
                 self.parent.trend_graph.axes.clear()
@@ -78,8 +79,12 @@ class SettingsPanel(QWidget):
             self.change_theme(self.theme_selector.currentText())
 
             # Обновляем метрики и наблюдатель
+            self.parent.update_years()  # Обновляем годы
             self.parent.update_opening_hours()
+            self.parent.update_code_analysis_years()  # Обновляем годы для анализа кода
+            self.parent.populate_files_list()  # Заполняем список файлов
             self.parent.update_code_analysis()
+            self.parent.update_years_charts()
             self.parent.update_charts()
             self.parent.start_file_watcher(project_path)
 
@@ -152,5 +157,11 @@ class SettingsPanel(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку проекта")
         if folder:
             self.project_path_input.setText(folder)
+            # Проверяем, является ли папка Git-репозиторием
+            if not os.path.exists(os.path.join(folder, '.git')):
+                QMessageBox.warning(self, "Предупреждение", "Выбранная папка не является Git-репозиторием")
+                return None
+            # Обновляем список файлов
+            self.parent.populate_files_list()
             return folder
         return None
