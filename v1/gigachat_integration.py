@@ -11,8 +11,45 @@ import urllib3
 import uuid
 import git
 import os
+from PyQt5.QtCore import QSettings
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+PROMPT_TEMPLATE = """Ты — профессиональный разработчик уровня Senior и технический рецензент.  
+Твоя задача — строго и точно определить, насколько пользователь выполнил поставленную им задачу,  
+основываясь **исключительно на формулировке задачи и содержимом коммитов**.
+
+---
+
+🔹 Формулировка задачи:
+"{user_task}"
+
+🔹 Содержимое коммитов:
+{commit_list}
+
+---
+
+🔍 Правила анализа:
+1. **Оценивай строго по формулировке задачи**. Не додумывай, что «наверное имелось в виду».  
+2. Если задача требует конкретного вывода, поведения, файла или ресурса — проверяй это **буквально**.
+3. **Не учитывай намерения**. Оцени только то, что реально реализовано в коде/коммитах.
+4. Если задача выполнена частично — оцени **по доле сути, а не по длине кода**.
+5. Не снижай оценку за стиль, структуру, тесты или документацию, если они **не требуются в задаче**.
+6. Если коммиты не делают ничего осмысленного (например, `print()` без аргументов) — это 0%.
+
+---
+
+🔁 Формат ответа:
+Оценка выполнения: [процент от 0 до 100]%
+
+Краткий комментарий:
+- Что реализовано: [перечисли ключевые элементы задачи, которые выполнены]
+- Чего не хватает: [перечисли, что из формулировки отсутствует в коммитах]
+- Обоснование: [объясни оценку логически, не предполагая скрытого смысла]
+"""
+
+def create_message(role: str, content: str) -> Dict[str, str]:
+    return {"role": role, "content": content}
 
 class GitAnalyzer:
     def __init__(self, repo_path="."):
@@ -83,11 +120,22 @@ class GigaChatWorker(QThread):
         self.auth_key = auth_key
         self.task = task
         self.period = period
+        self.model = "GigaChat"  # Default model
         try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            self.git_analyzer = GitAnalyzer(current_dir)
+            # Получаем путь к проекту из настроек
+            settings = QSettings("MyCompany", "DevMetricsApp")
+            project_path = settings.value("project_path", "")
+            if not project_path:
+                raise Exception("Путь к проекту не указан в настройках")
+            
+            # Инициализируем GitAnalyzer с путем из настроек
+            self.git_analyzer = GitAnalyzer(project_path)
         except Exception as e:
             raise Exception(f"Ошибка при инициализации Git: {str(e)}")
+
+    def set_model(self, model_name):
+        """Устанавливает модель для использования в запросе."""
+        self.model = model_name
 
     def get_access_token(self) -> str:
         url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
@@ -111,29 +159,30 @@ class GigaChatWorker(QThread):
             raise Exception(f"Ошибка получения access token: {str(e)}")
 
     def format_commits_info(self, commits):
+        """Форматирует информацию только о последнем коммите, включая содержимое файлов."""
         if not commits:
             return "Нет изменений за выбранный период."
         
-        formatted_info = "История изменений:\n\n"
-        for commit in commits:
-            formatted_info += f"Коммит: {commit['hash']}\n"
-            formatted_info += f"Автор: {commit['author']}\n"
-            formatted_info += f"Дата: {commit['date']}\n"
-            formatted_info += f"Сообщение: {commit['message']}\n"
-            formatted_info += "Измененные файлы:\n"
-            for file in commit['files_changed']:
-                formatted_info += f"- {file}\n"
-            formatted_info += "\n"
+        last_commit = commits[0]  # Первый в списке — самый свежий
+        formatted_info = "Последний коммит:\n"
+        formatted_info += f"Коммит: {last_commit['hash']}\n"
+        formatted_info += f"Автор: {last_commit['author']}\n"
+        formatted_info += f"Дата: {last_commit['date']}\n"
+        formatted_info += f"Сообщение: {last_commit['message']}\n"
+        formatted_info += "Измененные файлы:\n"
+        for file in last_commit['files_changed']:
+            formatted_info += f"- {file}\n"
+            try:
+                content = self.git_analyzer.get_file_content_at_commit(file, last_commit['hash'])
+                if content:
+                    lines = content.splitlines()
+                    preview = '\n'.join(lines[:30])
+                    if len(lines) > 30:
+                        preview += f"\n... (показаны первые 30 строк из {len(lines)})"
+                    formatted_info += f"  Содержимое файла на момент коммита:\n{preview}\n"
+            except Exception as e:
+                formatted_info += f"  [Ошибка при получении содержимого файла: {str(e)}]\n"
         return formatted_info
-
-    def get_period_days(self):
-        period_mapping = {
-            "Последний день": 1,
-            "Последняя неделя": 7,
-            "Последний месяц": 30,
-            "Весь период": 365
-        }
-        return period_mapping.get(self.period, 1)
 
     def run(self):
         try:
@@ -141,49 +190,19 @@ class GigaChatWorker(QThread):
             commits = self.git_analyzer.get_commits_for_period(days)
             commits_info = self.format_commits_info(commits)
 
-            prompt = f"""Ты — опытный инженер-программист уровня senior с глубоким пониманием процессов разработки ПО. 
-            
-Твоя задача — проанализировать степень выполнения поставленной задачи на основе:
-1. Описания желаемого результата
-2. Фактических изменений в коде (коммитов)
-
-Задача от пользователя:
-"{self.task}"
-
-{commits_info}
-
-При анализе учитывай следующие критерии:
-1. Полнота реализации основного функционала (вес: 60%)
-2. Работоспособность решения (вес: 30%)
-3. Соответствие требованиям задачи (вес: 10%)
-
-Важно:
-- Оценивай только то, что указано в формулировке задачи
-- Не учитывай дополнительные улучшения, если они не требовались
-- Фокусируйся на функциональности, а не на стиле кода
-- Если в коммитах нет информации о каком-то аспекте, считай его нереализованным
-- Если нет изменений в коде или они не соответствуют задаче, оценка должна быть 0%
-
-Ответ предоставь в следующем формате:
-Оценка выполнения: {{percentage}}%
-Реализовано: {{implemented}}
-Не реализовано: {{not_implemented}}
-Рекомендации: {{recommendations}}"""
+            prompt = PROMPT_TEMPLATE.format(
+                user_task=self.task,
+                commit_list=commits_info
+            )
 
             access_token = self.get_access_token()
             url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
             
             payload = {
-                "model": "GigaChat:latest",
+                "model": self.model,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "Ты — опытный инженер-программист, специализирующийся на анализе качества кода и оценке выполнения задач."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    create_message("system", "Ты — опытный программист уровня Senior и технический эксперт. Анализируй задачи строго по их формулировке."),
+                    create_message("user", prompt)
                 ],
                 "temperature": 0.7,
                 "max_tokens": 2000
@@ -207,11 +226,21 @@ class GigaChatWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+    def get_period_days(self):
+        period_mapping = {
+            "Последний день": 1,
+            "Последняя неделя": 7,
+            "Последний месяц": 30,
+            "Весь период": 365
+        }
+        return period_mapping.get(self.period, 1)
+
 class GigaChatPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
         self.auth_key = None
+        self.settings = QSettings("MyCompany", "DevMetricsApp")
         self.init_ui()
 
     def init_ui(self):
@@ -273,6 +302,15 @@ class GigaChatPanel(QWidget):
         self.response_text.setPlaceholderText("Здесь появится анализ выполнения задачи...")
         layout.addWidget(self.response_text)
 
+        # --- Новый код: автозагрузка ключа ---
+        saved_key = self.settings.value("gigachat_api_key", "")
+        if saved_key:
+            self.auth_key_input.setText(saved_key)
+            self.auth_key = saved_key
+            self.analyze_button.setEnabled(True)
+        else:
+            self.analyze_button.setEnabled(False)
+
     def initialize_gigachat(self):
         auth_key = self.auth_key_input.text().strip()
         if not auth_key:
@@ -287,6 +325,9 @@ class GigaChatPanel(QWidget):
             if test_token:
                 QMessageBox.information(self, "Успех", "GigaChat успешно инициализирован!")
                 self.analyze_button.setEnabled(True)
+                # --- Новый код: сохраняем ключ ---
+                self.settings.setValue("gigachat_api_key", self.auth_key)
+                self.settings.sync()
             else:
                 raise Exception("Не удалось получить токен доступа")
             
@@ -307,11 +348,13 @@ class GigaChatPanel(QWidget):
             return
 
         period = self.period_selector.currentText()
+        model = self.model_selector.currentText()
         
         self.progress.setVisible(True)
         self.analyze_button.setEnabled(False)
         
         self.worker = GigaChatWorker(self.auth_key, task, period)
+        self.worker.set_model(model)
         self.worker.finished.connect(self.handle_response)
         self.worker.error.connect(self.handle_error)
         self.worker.finished.connect(lambda: self.cleanup_ui())

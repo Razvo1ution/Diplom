@@ -255,10 +255,6 @@ class DevMetricsApp(QMainWindow):
 
     def create_gigachat_panel(self):
         self.gigachat_panel = GigaChatPanel(self)
-        api_key = self.settings.value("gigachat_api_key", "")
-        if api_key:
-            self.gigachat_panel.auth_key_input.setText(api_key)
-            self.gigachat_panel.initialize_gigachat()
 
     def toggle_menu(self):
         if self.menu_dock.isVisible():
