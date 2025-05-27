@@ -91,6 +91,14 @@ class ActivityChart(FigureCanvas):
         self.fig.tight_layout()
         self.draw()
 
+class MplCanvas(FigureCanvas):
+    def __init__(self, parent=None, width=8, height=4, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setParent(parent)
+        self.colorbar = None
+
 class DevMetricsApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -745,31 +753,60 @@ class DevMetricsApp(QMainWindow):
         month = self.month_selector_charts.currentIndex() + 1
         year = int(self.year_selector_charts.currentText()) if self.year_selector_charts.currentText() else datetime.now().year
         try:
-            metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics = update_opening_hours(project_path, month, year)
-            self.chart_time_data = {
-                'metrics_text': metrics_text,
-                'days': days,
-                'hours': hours,
-                'weekend_days': weekend_days,
-                'heatmap_data': heatmap_data,
-                'month_days': month_days,
-                'daily_metrics': daily_metrics
+            # Получаем данные для графиков с учетом выбранного года и месяца
+            weeks, commits_per_week, hours_data, heatmap_data, project_name = update_charts(
+                project_path, 
+                selected_year=year,
+                selected_month=month
+            )
+            
+            # Обновляем данные для графиков
+            self.chart_data = {
+                'weeks': weeks,
+                'commits_per_week': commits_per_week,
+                'project_name': project_name
             }
-            weeks, commits_per_week = update_charts(project_path)
-            self.chart_data = {'weeks': weeks, 'commits_per_week': commits_per_week}
+            
+            # Если есть данные о часах и тепловой карте, обновляем их
+            if hours_data is not None and heatmap_data is not None:
+                # Получаем дни месяца
+                _, last_day = calendar.monthrange(year, month)
+                days = list(range(1, last_day + 1))
+                
+                self.chart_time_data = {
+                    'days': days,
+                    'hours': hours_data,
+                    'heatmap_data': heatmap_data,
+                    'month_days': days,
+                    'weekend_days': [day for day in days if calendar.weekday(year, month, day) >= 5],
+                    'year': year,
+                    'month': month
+                }
+            else:
+                # Если данных нет, создаем пустые структуры
+                self.chart_time_data = {
+                    'days': [],
+                    'hours': [],
+                    'heatmap_data': np.array([]),
+                    'month_days': [],
+                    'weekend_days': [],
+                    'year': year,
+                    'month': month
+                }
+            
             self.update_dashboard()
         except Exception as e:
             logging.error(f"Error in update_charts: {str(e)}")
             self.chart_time_data = {
-                'metrics_text': '',
                 'days': [],
                 'hours': [],
-                'weekend_days': [],
                 'heatmap_data': np.array([]),
                 'month_days': [],
-                'daily_metrics': {}
+                'weekend_days': [],
+                'year': year,
+                'month': month
             }
-            self.chart_data = {'weeks': 0, 'commits_per_week': []}
+            self.chart_data = {'weeks': 0, 'commits_per_week': [], 'project_name': None}
             self.update_dashboard()
 
     def update_dashboard(self):
@@ -790,122 +827,91 @@ class DevMetricsApp(QMainWindow):
             bg_color = '#000000'
             grid_color = '#6B8E23'
 
+        # Получаем информацию о проекте и месяце
+        project_name = self.chart_data.get('project_name', 'Проект не выбран')
+        month_name = self.month_selector_charts.currentText()
+        year = self.chart_time_data.get('year', datetime.now().year)
+
+        # Очищаем все графики перед обновлением
+        for canvas in [self.trend_graph, self.dash_histogram, self.dash_heatmap]:
+            canvas.figure.clear()
+            canvas.axes = canvas.figure.add_subplot(111)
+            canvas.figure.set_facecolor(bg_color)
+            canvas.axes.set_facecolor(bg_color)
+
         # Тренд продуктивности
-        self.trend_graph.axes.clear()
         weeks = self.chart_data['weeks']
         commits_per_week = self.chart_data['commits_per_week']
         if weeks and commits_per_week and any(commits_per_week):
-            self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o', color='orange')
+            self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o', color='orange', linewidth=2)
             self.trend_graph.axes.set_xticks(range(weeks))
             self.trend_graph.axes.set_xticklabels([f"Неделя {i + 1}" for i in range(weeks)], color=text_color)
             self.trend_graph.axes.set_xlabel("Недели", color=text_color)
             self.trend_graph.axes.set_ylabel("Количество коммитов", color=text_color)
-            self.trend_graph.axes.set_title("Тренд продуктивности", color=text_color)
-            self.trend_graph.axes.set_facecolor(bg_color)
-            self.trend_graph.figure.set_facecolor(bg_color)
+            self.trend_graph.axes.set_title(f"Тренд продуктивности - {project_name}", color=text_color)
             self.trend_graph.axes.tick_params(colors=text_color)
             self.trend_graph.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
         else:
-            self.trend_graph.axes.text(0.5, 0.5, "Нет данных для графика", ha='center', va='center', fontsize=12, color=text_color)
-            self.trend_graph.axes.set_xlabel("Недели", color=text_color)
-            self.trend_graph.axes.set_ylabel("Количество коммитов", color=text_color)
-            self.trend_graph.axes.set_title("Тренд продуктивности", color=text_color)
-            self.trend_graph.axes.set_facecolor(bg_color)
-            self.trend_graph.figure.set_facecolor(bg_color)
+            self.trend_graph.axes.text(0.5, 0.5, "Нет данных для графика", 
+                                     ha='center', va='center', fontsize=12, color=text_color)
+            self.trend_graph.axes.set_title(f"Тренд продуктивности - {project_name}", color=text_color)
+        self.trend_graph.figure.tight_layout()
         self.trend_graph.draw()
 
         # Гистограмма отработанного времени
-        self.dash_histogram.axes.clear()
         days = self.chart_time_data['days']
         hours = self.chart_time_data['hours']
         weekend_days = self.chart_time_data['weekend_days']
         if days and any(hours):
-            hours_per_day = self.work_schedule_panel.get_hours_per_day()
-            colors = []
-            for i, day in enumerate(days):
-                if day in weekend_days:
-                    colors.append('red')
-                elif hours[i] > hours_per_day:
-                    colors.append('orange')
-                else:
-                    colors.append('blue')
-
+            colors = ['red' if day in weekend_days else 'blue' for day in days]
             self.dash_histogram.axes.bar(days, hours, color=colors)
             self.dash_histogram.axes.set_xticks(days)
-            labels = [str(day) for day in days]
-            for i, label in enumerate(self.dash_histogram.axes.get_xticklabels()):
-                label.set_color('red' if days[i] in weekend_days else text_color)
-            self.dash_histogram.axes.set_xticklabels(labels, color=text_color)
+            self.dash_histogram.axes.set_xticklabels([str(day) for day in days], color=text_color)
             self.dash_histogram.axes.set_xlabel("Дни месяца", color=text_color)
-            self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
-            month = self.month_selector_charts.currentText()
-            year = self.year_selector_charts.currentText() or str(datetime.now().year)
-            self.dash_histogram.axes.set_title(f"График отработанного времени ({month} {year})", color=text_color)
-            self.dash_histogram.axes.set_facecolor(bg_color)
-            self.dash_histogram.figure.set_facecolor(bg_color)
+            self.dash_histogram.axes.set_ylabel("Количество коммитов", color=text_color)
+            self.dash_histogram.axes.set_title(f"Активность по дням - {project_name}\n{month_name} {year}", color=text_color)
             self.dash_histogram.axes.tick_params(colors=text_color)
             self.dash_histogram.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
-            max_hours = max(int(np.ceil(max(hours, default=0))), int(hours_per_day))
-            self.dash_histogram.axes.set_yticks(np.arange(0, max_hours + 1, 1))
+            max_commits = max(int(np.ceil(max(hours, default=0))), 1)
+            self.dash_histogram.axes.set_yticks(np.arange(0, max_commits + 1, 1))
         else:
-            self.dash_histogram.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12, color=text_color)
-            self.dash_histogram.axes.set_xlabel("Дни месяца", color=text_color)
-            self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
-            self.dash_histogram.axes.set_title("График отработанного времени", color=text_color)
-            self.dash_histogram.axes.set_facecolor(bg_color)
-            self.dash_histogram.figure.set_facecolor(bg_color)
+            self.dash_histogram.axes.text(0.5, 0.5, "Нет данных", 
+                                        ha='center', va='center', fontsize=12, color=text_color)
+            self.dash_histogram.axes.set_title(f"Активность по дням - {project_name}\n{month_name} {year}", color=text_color)
+        self.dash_histogram.figure.tight_layout()
         self.dash_histogram.draw()
 
-        # Heatmap активности
-        self.dash_heatmap.figure.clear()
-        self.dash_heatmap.axes = self.dash_heatmap.figure.add_subplot(111)
-        self.dash_heatmap.figure.set_size_inches(8, 3)
-        if hasattr(self.dash_heatmap, 'colorbar') and self.dash_heatmap.colorbar:
-            try:
-                self.dash_heatmap.colorbar.remove()
-            except:
-                pass
-            self.dash_heatmap.colorbar = None
+        # Тепловая карта активности
         heatmap_data = self.chart_time_data['heatmap_data']
         month_days = self.chart_time_data['month_days']
-        if heatmap_data.size > 0 and heatmap_data.any():
-            self.dash_heatmap.axes.set_position([0.1, 0.4, 0.7, 0.5])
-            sns.heatmap(heatmap_data, ax=self.dash_heatmap.axes, cmap="YlOrRd",
-                        xticklabels=[f"{i}:00" for i in range(0, 24, 3)],
-                        yticklabels=[str(day) for day in month_days],
-                        cbar_kws={'label': 'Количество коммитов', 'shrink': 0.8, 'pad': 0.05})
-            self.dash_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)", color=text_color)
+        if isinstance(heatmap_data, np.ndarray) and heatmap_data.size > 0 and heatmap_data.any():
+            # Устанавливаем размеры и отступы для тепловой карты
+            self.dash_heatmap.axes.set_position([0.1, 0.2, 0.7, 0.7])
+            
+            # Создаем тепловую карту
+            heatmap = sns.heatmap(heatmap_data, ax=self.dash_heatmap.axes, 
+                                 cmap="YlOrRd", 
+                                 xticklabels=[f"{i}:00" for i in range(0, 24, 3)],
+                                 yticklabels=[str(day) for day in month_days],
+                                 cbar_kws={'label': 'Количество коммитов'})
+            
+            # Настраиваем внешний вид
+            self.dash_heatmap.axes.set_title(f"Тепловая карта активности - {project_name}\n{month_name} {year}", color=text_color)
             self.dash_heatmap.axes.set_xlabel("Часы", color=text_color)
             self.dash_heatmap.axes.set_ylabel("Дни месяца", color=text_color)
-            self.dash_heatmap.axes.tick_params(axis='x', labelsize=5, rotation=90, colors=text_color)
-            self.dash_heatmap.axes.tick_params(axis='y', labelsize=8, colors=text_color)
-            self.dash_heatmap.axes.set_facecolor(bg_color)
-            self.dash_heatmap.figure.set_facecolor(bg_color)
-            self.dash_heatmap.colorbar = self.dash_heatmap.axes.collections[0].colorbar
-            self.dash_heatmap.colorbar.set_label('Количество коммитов', color=text_color)
-            self.dash_heatmap.colorbar.ax.yaxis.set_tick_params(color=text_color)
-            self.dash_heatmap.colorbar.ax.tick_params(colors=text_color)
-            for label in self.dash_heatmap.colorbar.ax.get_yticklabels():
-                label.set_color(text_color)
-            self.dash_heatmap.figure.tight_layout()
+            self.dash_heatmap.axes.tick_params(colors=text_color)
+            
+            # Настраиваем цветовую шкалу
+            colorbar = heatmap.collections[0].colorbar
+            colorbar.set_label('Количество коммитов', color=text_color)
+            colorbar.ax.tick_params(colors=text_color)
+            plt.setp(colorbar.ax.get_yticklabels(), color=text_color)
         else:
-            self.dash_heatmap.axes.set_position([0.1, 0.4, 0.8, 0.5])
-            self.dash_heatmap.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12, color=text_color)
-            self.dash_heatmap.axes.set_xlabel("Часы", color=text_color)
-            self.dash_heatmap.axes.set_ylabel("Дни месяца", color=text_color)
-            self.dash_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)", color=text_color)
-            self.dash_heatmap.axes.set_facecolor(bg_color)
-            self.dash_heatmap.figure.set_facecolor(bg_color)
-            self.dash_heatmap.figure.tight_layout()
+            self.dash_heatmap.axes.text(0.5, 0.5, "Нет данных", 
+                                      ha='center', va='center', fontsize=12, color=text_color)
+            self.dash_heatmap.axes.set_title(f"Тепловая карта активности - {project_name}\n{month_name} {year}", color=text_color)
+        self.dash_heatmap.figure.tight_layout()
         self.dash_heatmap.draw()
-
-class MplCanvas(FigureCanvas):
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=100)
-        self.axes = fig.add_subplot(111)
-        self.colorbar = None
-        super().__init__(fig)
-        self.setParent(parent)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
