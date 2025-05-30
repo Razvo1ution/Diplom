@@ -3,9 +3,11 @@ import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
                              QPushButton, QTabWidget, QHBoxLayout, QDockWidget,
                              QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox,
-                             QGroupBox, QListWidget)
+                             QGroupBox, QListWidget, QSizePolicy)
 from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings
 from PyQt5.QtGui import QIcon, QFont, QFontDatabase
+import matplotlib
+matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from settings import SettingsPanel
@@ -26,6 +28,9 @@ import logging
 # Настройка логирования
 logging.basicConfig(filename='devmetrics.log', level=logging.ERROR,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Настройка matplotlib для поддержки кириллицы
+plt.rcParams['font.family'] = 'DejaVu Sans'
 
 class DevMetricsApp(QMainWindow):
     def __init__(self):
@@ -102,6 +107,9 @@ class DevMetricsApp(QMainWindow):
         self.time_tab = QWidget()
         time_layout = QVBoxLayout(self.time_tab)
 
+        # Создаем график активности
+        self.activity_chart = MplCanvas(self, width=8, height=3, dpi=100)
+
         time_layout.addWidget(QLabel("Время работы:"))
         self.time_metrics = QTextEdit()
         self.time_metrics.setReadOnly(True)
@@ -127,6 +135,10 @@ class DevMetricsApp(QMainWindow):
 
         controls_layout.addStretch()
         time_layout.addLayout(controls_layout)
+
+        # Добавляем график и его заголовок
+        time_layout.addWidget(QLabel("Активность за день:"))
+        time_layout.addWidget(self.activity_chart)
 
         time_layout.addWidget(QLabel("Метрики за выбранный день:"))
         self.day_metrics = QTextEdit()
@@ -459,7 +471,8 @@ class DevMetricsApp(QMainWindow):
             # Обновляем метрики для выбранного дня
             self.update_day_metrics()
 
-            self.update_dashboard()
+            # Обновляем гистограмму активности
+            self.update_activity_histogram()
 
         except Exception as e:
             logging.error(f"Error in update_opening_hours: {str(e)}")
@@ -475,7 +488,7 @@ class DevMetricsApp(QMainWindow):
             }
             self.day_selector.clear()
             self.day_metrics.setText("Нет данных")
-            self.update_dashboard()
+            self.update_activity_histogram()  # Очищаем гистограмму при ошибке
 
     def update_day_metrics(self):
         if not self.time_data['daily_metrics']:
@@ -518,6 +531,14 @@ class DevMetricsApp(QMainWindow):
             f"Ночные коммиты: {night_commits}"
         )
         self.day_metrics.setText(metrics_text)
+
+        # Обновляем график активности
+        self.update_activity_histogram()
+
+        # Добавляем отладочный вывод
+        print(f"Обновление графика для дня {selected_day}")
+        print(f"Часовая активность: {self.time_data['hourly_activity']}")
+        print(f"Рабочие часы: {self.time_data['work_hours']}")
 
     def update_code_analysis_years(self):
         """Обновляет список лет в выпадающем списке для анализа кода"""
@@ -642,7 +663,10 @@ class DevMetricsApp(QMainWindow):
         month = self.month_selector_charts.currentIndex() + 1
         year = int(self.year_selector_charts.currentText()) if self.year_selector_charts.currentText() else datetime.now().year
         try:
+            # Получаем данные о времени работы
             metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end = update_opening_hours(project_path, month, year)
+            
+            # Обновляем данные о времени
             self.chart_time_data = {
                 'metrics_text': metrics_text,
                 'days': days,
@@ -659,9 +683,22 @@ class DevMetricsApp(QMainWindow):
                     'lunch_end': lunch_end
                 }
             }
-            weeks, commits_per_week, hours, heatmap_data, project_name = update_charts(project_path, year, month)
-            self.chart_data = {'weeks': weeks, 'commits_per_week': commits_per_week}
+            
+            # Получаем данные для графиков
+            weeks, commits_per_week, commit_hours, commit_heatmap, project_name = update_charts(project_path, year, month)
+            
+            # Обновляем данные графиков
+            self.chart_data = {
+                'weeks': weeks,
+                'commits_per_week': commits_per_week,
+                'commit_hours': commit_hours,
+                'commit_heatmap': commit_heatmap,
+                'project_name': project_name
+            }
+            
+            # Обновляем отображение
             self.update_dashboard()
+            
         except Exception as e:
             logging.error(f"Error in update_charts: {str(e)}")
             self.chart_time_data = {
@@ -671,9 +708,22 @@ class DevMetricsApp(QMainWindow):
                 'weekend_days': [],
                 'heatmap_data': np.array([]),
                 'month_days': [],
-                'daily_metrics': {}
+                'daily_metrics': {},
+                'hourly_activity': {},
+                'work_hours': {
+                    'start': None,
+                    'end': None,
+                    'lunch_start': None,
+                    'lunch_end': None
+                }
             }
-            self.chart_data = {'weeks': 0, 'commits_per_week': []}
+            self.chart_data = {
+                'weeks': 0,
+                'commits_per_week': [],
+                'commit_hours': [],
+                'commit_heatmap': None,
+                'project_name': ''
+            }
             self.update_dashboard()
 
     def update_dashboard(self):
@@ -806,13 +856,124 @@ class DevMetricsApp(QMainWindow):
         self.dash_heatmap.figure.tight_layout()
         self.dash_heatmap.draw()
 
+    def update_activity_histogram(self):
+        try:
+            if not hasattr(self, 'activity_chart'):
+                return
+
+            # Определяем текущую тему
+            theme = self.settings_panel.theme_selector.currentText()
+
+            # Настройки цветов для графиков в зависимости от темы
+            if theme == "Светлая":
+                text_color = 'black'
+                bg_color = 'white'
+                grid_color = 'gray'
+                line_color = 'blue'
+            elif theme == "Темная":
+                text_color = 'white'
+                bg_color = '#353535'
+                grid_color = 'lightgray'
+                line_color = 'lightblue'
+            else:  # Темный контраст
+                text_color = '#6B8E23'
+                bg_color = '#000000'
+                grid_color = '#6B8E23'
+                line_color = '#6B8E23'
+
+            # Очищаем график
+            self.activity_chart.clear_and_reset()
+            
+            selected_day_text = self.day_selector.currentText()
+            if not selected_day_text:
+                self.activity_chart.draw()
+                return
+
+            try:
+                selected_day = int(selected_day_text.split()[1])
+            except (IndexError, ValueError):
+                print(f"Ошибка при получении номера дня из '{selected_day_text}'")
+                return
+
+            # Получаем данные
+            daily_metrics = self.time_data.get('daily_metrics', {})
+            hourly_activity = self.time_data.get('hourly_activity', {})
+
+            if selected_day in daily_metrics and selected_day in hourly_activity:
+                # Создаем массив часов (0-23)
+                hours = list(range(24))
+                
+                # Получаем данные о коммитах по часам для выбранного дня
+                commits_by_hour = hourly_activity[selected_day]
+
+                # Получаем рабочие часы из данных дня
+                day_data = daily_metrics[selected_day]
+                work_period = day_data.get('work_period', (None, None))
+                work_start, work_end = work_period if work_period else (None, None)
+
+                # Создаем график
+                self.activity_chart.axes.plot(hours, commits_by_hour, color=line_color, 
+                                            marker='o', linestyle='-', label='Коммиты')
+                
+                # Добавляем вертикальные линии для рабочего времени
+                if work_start and work_end:
+                    self.activity_chart.axes.axvline(x=work_start.hour, color='green', 
+                                                   linestyle='--', label='Начало работы')
+                    self.activity_chart.axes.axvline(x=work_end.hour, color='red', 
+                                                   linestyle='--', label='Конец работы')
+
+                    # Добавляем линии обеда
+                    self.activity_chart.axes.axvline(x=12, color='orange', 
+                                                   linestyle='--', label='Начало обеда')
+                    self.activity_chart.axes.axvline(x=13, color='orange', 
+                                                   linestyle='--', label='Конец обеда')
+
+                # Настройка осей и подписей
+                self.activity_chart.axes.set_xlabel("Часы", color=text_color)
+                self.activity_chart.axes.set_ylabel("Количество коммитов", color=text_color)
+                self.activity_chart.axes.set_title(f"Активность за день {selected_day}", color=text_color)
+                self.activity_chart.axes.set_xticks(hours)
+                self.activity_chart.axes.set_xlim(-0.5, 23.5)
+                
+                # Устанавливаем максимальное значение по Y
+                max_commits = max(commits_by_hour)
+                if max_commits > 0:
+                    self.activity_chart.axes.set_ylim(-0.1, max_commits + 0.5)
+                
+                self.activity_chart.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
+                self.activity_chart.axes.legend(loc='upper right', facecolor=bg_color, labelcolor=text_color)
+
+            else:
+                self.activity_chart.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', 
+                                            fontsize=12, color=text_color)
+                self.activity_chart.axes.set_xlabel("Часы", color=text_color)
+                self.activity_chart.axes.set_ylabel("Количество коммитов", color=text_color)
+
+            # Настройка цветов и отрисовка
+            self.activity_chart.axes.set_facecolor(bg_color)
+            self.activity_chart.fig.set_facecolor(bg_color)
+            self.activity_chart.axes.tick_params(colors=text_color)
+            self.activity_chart.fig.tight_layout()
+            self.activity_chart.draw()
+
+        except Exception as e:
+            print(f"Ошибка при обновлении графика: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=100)
-        self.axes = fig.add_subplot(111)
-        self.colorbar = None
-        super().__init__(fig)
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        
         self.setParent(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
+
+    def clear_and_reset(self):
+        self.axes.clear()
+        self.fig.tight_layout()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
