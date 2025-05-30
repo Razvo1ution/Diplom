@@ -142,7 +142,7 @@ class AdminApp(QMainWindow):
             self.users_table.setRowCount(len(authors))
 
             for row, author in enumerate(authors):
-                metrics_text, _, hours, _, _, _, daily_metrics = update_opening_hours(
+                metrics_text, _, hours, _, _, _, daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end = update_opening_hours(
                     self.project_path, month, year, max_count=10000, author=author
                 )
                 total_hours = sum(hours) if hours else 0

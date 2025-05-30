@@ -49,12 +49,12 @@ def update_charts(project_path, selected_year=None, selected_month=None):
             commit_time = datetime.fromtimestamp(commit.committed_date)
             
             # Для тренда продуктивности (за последние 4 недели)
-            weeks_ago = (today - commit_time).days // 7
-            if weeks_ago < weeks:
-                commits_per_week[weeks_ago] += 1
-            
-            # Для гистограммы и тепловой карты (за выбранный месяц)
             if commit_time.year == target_year and commit_time.month == target_month:
+                week_of_month = (commit_time.day - 1) // 7
+                if week_of_month < weeks:
+                    commits_per_week[week_of_month] += 1
+            
+                # Для гистограммы и тепловой карты (за выбранный месяц)
                 day_idx = commit_time.day - 1
                 hour = commit_time.hour
                 
