@@ -1,0 +1,7 @@
+TDAText created by Tinelix (Dmitry Tretyakov)
+Copyright (c) 2024-2025 Dmitry Tretyakov
+
+Based on Philips SAA52XX/SAA55XX/TDA93XX IC character set:
+Copyright (c) 1993-2001 NXP Semiconductors N.V.
+
+Source: https://github.com/tinelix/TDAText

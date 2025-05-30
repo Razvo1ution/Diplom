@@ -1,29 +1,66 @@
 import sys
 import os
-from datetime import datetime, timedelta
-from git import Repo
-from git.exc import InvalidGitRepositoryError
-from radon.complexity import cc_visit
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
                              QPushButton, QTabWidget, QHBoxLayout, QDockWidget,
-                             QDesktopWidget, QLabel, QTextEdit)
+                             QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox,
+                             QGroupBox, QListWidget, QSizePolicy)
 from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings
-from PyQt5.QtGui import QIcon
-import matplotlib.pyplot as plt
+from PyQt5.QtGui import QIcon, QFont, QFontDatabase
+import matplotlib
+matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-import numpy as np
 from settings import SettingsPanel
+from OpeningHours import update_opening_hours, get_years, format_time
+from CodeAnalysis import update_code_analysis, get_repository_files
+from Charts import update_charts
+from file_watcher import start_file_watcher
+from WorkSchedule import WorkSchedulePanel
+from gigachat_integration import GigaChatPanel
+from datetime import datetime
+import numpy as np
+import calendar
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import logging
+
+# Настройка логирования
+logging.basicConfig(filename='devmetrics.log', level=logging.ERROR,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Настройка matplotlib для поддержки кириллицы
+plt.rcParams['font.family'] = 'DejaVu Sans'
 
 class DevMetricsApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Анализатор продуктивности")
         self.settings = QSettings("MyCompany", "DevMetricsApp")
+        self.observer = None
+        self.chart_data = {'weeks': 0, 'commits_per_week': []}
+        self.time_data = {
+            'metrics_text': '',
+            'days': [],
+            'hours': [],
+            'weekend_days': [],
+            'heatmap_data': np.array([]),
+            'month_days': [],
+            'daily_metrics': {}
+        }
+        self.chart_time_data = {
+            'metrics_text': '',
+            'days': [],
+            'hours': [],
+            'weekend_days': [],
+            'heatmap_data': np.array([]),
+            'month_days': [],
+            'daily_metrics': {}
+        }
         self.init_ui()
 
     def init_ui(self):
-        self.setFixedSize(1000, 800)
+        self.setFixedSize(1000, 1000)
         self.center_window()
 
         self.central_widget = QWidget()
@@ -32,6 +69,8 @@ class DevMetricsApp(QMainWindow):
 
         self.create_top_panel()
         self.create_settings_panel()
+        self.create_work_schedule_panel()
+        self.create_gigachat_panel()
         self.create_tabs()
         self.create_menu_panel()
 
@@ -58,45 +97,168 @@ class DevMetricsApp(QMainWindow):
 
     def create_tabs(self):
         self.tabs = QTabWidget()
-        self.create_time_tab()
-        self.create_code_tab()
-        self.create_graph_tab()
+        self.create_opening_hours_tab()
+        self.create_code_analysis_tab()
+        self.create_charts_tab()
+        self.create_gigachat_tab()
         self.main_layout.addWidget(self.tabs)
 
-    def create_time_tab(self):
-        time_tab = QWidget()
-        time_layout = QVBoxLayout(time_tab)
+    def create_opening_hours_tab(self):
+        self.time_tab = QWidget()
+        time_layout = QVBoxLayout(self.time_tab)
 
-        time_layout.addWidget(QLabel("Активное время работы:"))
+        # Создаем график активности
+        self.activity_chart = MplCanvas(self, width=8, height=3, dpi=100)
+
+        time_layout.addWidget(QLabel("Время работы:"))
         self.time_metrics = QTextEdit()
         self.time_metrics.setReadOnly(True)
         time_layout.addWidget(self.time_metrics)
 
-        self.time_heatmap = MplCanvas(self, width=8, height=4, dpi=100)
-        time_layout.addWidget(self.time_heatmap)
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(QLabel("Месяц:"))
+        self.month_selector = QComboBox()
+        self.month_selector.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                      "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.month_selector.currentIndexChanged.connect(self.update_opening_hours)
+        controls_layout.addWidget(self.month_selector)
 
-        self.tabs.addTab(time_tab, "Время работы")
+        controls_layout.addWidget(QLabel("Год:"))
+        self.year_selector = QComboBox()
+        self.year_selector.currentTextChanged.connect(self.update_opening_hours)
+        controls_layout.addWidget(self.year_selector)
 
-    def create_code_tab(self):
+        controls_layout.addWidget(QLabel("День:"))
+        self.day_selector = QComboBox()
+        self.day_selector.currentIndexChanged.connect(self.update_day_metrics)
+        controls_layout.addWidget(self.day_selector)
+
+        controls_layout.addStretch()
+        time_layout.addLayout(controls_layout)
+
+        # Добавляем график и его заголовок
+        time_layout.addWidget(QLabel("Активность за день:"))
+        time_layout.addWidget(self.activity_chart)
+
+        time_layout.addWidget(QLabel("Метрики за выбранный день:"))
+        self.day_metrics = QTextEdit()
+        self.day_metrics.setReadOnly(True)
+        self.day_metrics.setFixedHeight(150)
+        time_layout.addWidget(self.day_metrics)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        time_layout.addWidget(self.progress_bar)
+
+        self.tabs.addTab(self.time_tab, "Время работы")
+
+    def create_code_analysis_tab(self):
         code_tab = QWidget()
         code_layout = QVBoxLayout(code_tab)
 
-        code_layout.addWidget(QLabel("Анализ кода:"))
+        # Верхняя часть с выбором файлов
+        files_group = QGroupBox("Выбор файлов для анализа")
+        files_layout = QVBoxLayout()
+        
+        # Список файлов с возможностью множественного выбора
+        self.files_list = QListWidget()
+        self.files_list.setSelectionMode(QListWidget.MultiSelection)
+        files_layout.addWidget(self.files_list)
+        
+        files_group.setLayout(files_layout)
+        code_layout.addWidget(files_group)
+
+        # Группа с выбором даты
+        date_group = QGroupBox("Выбор даты")
+        date_layout = QHBoxLayout()
+
+        # Селекторы даты
+        date_layout.addWidget(QLabel("Год:"))
+        self.code_year_selector = QComboBox()
+        self.code_year_selector.currentTextChanged.connect(self.update_code_analysis_days)
+        date_layout.addWidget(self.code_year_selector)
+
+        date_layout.addWidget(QLabel("Месяц:"))
+        self.code_month_selector = QComboBox()
+        self.code_month_selector.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                         "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.code_month_selector.currentIndexChanged.connect(self.update_code_analysis_days)
+        date_layout.addWidget(self.code_month_selector)
+
+        date_layout.addWidget(QLabel("День:"))
+        self.code_day_selector = QComboBox()
+        date_layout.addWidget(self.code_day_selector)
+
+        date_group.setLayout(date_layout)
+        code_layout.addWidget(date_group)
+
+        # Кнопка анализа
+        analyze_btn = QPushButton("Анализировать")
+        analyze_btn.clicked.connect(self.trigger_code_analysis)
+        code_layout.addWidget(analyze_btn)
+
+        # Группа для отображения результатов анализа
+        results_group = QGroupBox("Результаты анализа")
+        results_layout = QVBoxLayout()
+
+        # Текстовое поле для отображения результатов по выбранным файлам
+        self.selected_files_metrics = QTextEdit()
+        self.selected_files_metrics.setReadOnly(True)
+        self.selected_files_metrics.setPlaceholderText("Выберите файлы и дату для анализа")
+        results_layout.addWidget(QLabel("Статистика по выбранным файлам:"))
+        results_layout.addWidget(self.selected_files_metrics)
+
+        # Текстовое поле для общей статистики
         self.code_metrics = QTextEdit()
         self.code_metrics.setReadOnly(True)
-        code_layout.addWidget(self.code_metrics)
+        self.code_metrics.setPlaceholderText("Общая статистика проекта")
+        results_layout.addWidget(QLabel("Общая статистика за все время:"))
+        results_layout.addWidget(self.code_metrics)
+
+        results_group.setLayout(results_layout)
+        code_layout.addWidget(results_group)
 
         self.tabs.addTab(code_tab, "Анализ кода")
 
-    def create_graph_tab(self):
+    def create_charts_tab(self):
         graph_tab = QWidget()
         graph_layout = QVBoxLayout(graph_tab)
 
-        graph_layout.addWidget(QLabel("Графики продуктивности:"))
-        self.trend_graph = MplCanvas(self, width=8, height=4, dpi=100)
+        graph_layout.addWidget(QLabel("Дашборд продуктивности:"))
+
+        self.trend_graph = MplCanvas(self, width=8, height=3, dpi=100)
+        graph_layout.addWidget(QLabel("Тренд продуктивности:"))
         graph_layout.addWidget(self.trend_graph)
 
+        self.dash_histogram = MplCanvas(self, width=8, height=3, dpi=100)
+        graph_layout.addWidget(QLabel("Гистограмма отработанного времени:"))
+        graph_layout.addWidget(self.dash_histogram)
+
+        self.dash_heatmap = MplCanvas(self, width=8, height=3, dpi=100)
+        graph_layout.addWidget(QLabel("Heatmap активности:"))
+        graph_layout.addWidget(self.dash_heatmap)
+
+        # Контролы для выбора года и месяца
+        charts_controls_layout = QHBoxLayout()
+        charts_controls_layout.addWidget(QLabel("Месяц:"))
+        self.month_selector_charts = QComboBox()
+        self.month_selector_charts.addItems(["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                                             "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"])
+        self.month_selector_charts.currentIndexChanged.connect(self.update_charts)
+        charts_controls_layout.addWidget(self.month_selector_charts)
+
+        charts_controls_layout.addWidget(QLabel("Год:"))
+        self.year_selector_charts = QComboBox()
+        self.year_selector_charts.currentTextChanged.connect(self.update_charts)
+        charts_controls_layout.addWidget(self.year_selector_charts)
+
+        charts_controls_layout.addStretch()
+        graph_layout.addLayout(charts_controls_layout)
+
         self.tabs.addTab(graph_tab, "Графики")
+
+    def create_gigachat_tab(self):
+        self.tabs.addTab(self.gigachat_panel, "GigaChat")
 
     def create_menu_panel(self):
         self.menu_dock = QDockWidget()
@@ -109,9 +271,15 @@ class DevMetricsApp(QMainWindow):
         settings_btn.setIcon(QIcon.fromTheme("configure"))
         settings_btn.setText("Настройки")
         settings_btn.clicked.connect(self.toggle_settings)
-        menu_layout.addStretch()
-        menu_layout.addWidget(settings_btn, alignment=Qt.AlignBottom)
+        menu_layout.addWidget(settings_btn)
 
+        schedule_btn = QPushButton()
+        schedule_btn.setIcon(QIcon.fromTheme("calendar"))
+        schedule_btn.setText("Рабочий график")
+        schedule_btn.clicked.connect(self.toggle_work_schedule)
+        menu_layout.addWidget(schedule_btn)
+
+        menu_layout.addStretch()
         self.menu_dock.setWidget(menu_widget)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.menu_dock)
         self.menu_dock.hide()
@@ -136,6 +304,27 @@ class DevMetricsApp(QMainWindow):
 
         self.settings_widget.hide()
         self.main_layout.addWidget(self.settings_widget)
+
+    def create_work_schedule_panel(self):
+        self.work_schedule_widget = QWidget()
+        schedule_layout = QVBoxLayout(self.work_schedule_widget)
+
+        close_layout = QHBoxLayout()
+        close_layout.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.clicked.connect(self.toggle_work_schedule)
+        close_layout.addWidget(close_btn)
+        schedule_layout.addLayout(close_layout)
+
+        self.work_schedule_panel = WorkSchedulePanel(self)
+        schedule_layout.addWidget(self.work_schedule_panel)
+
+        self.work_schedule_widget.hide()
+        self.main_layout.addWidget(self.work_schedule_widget)
+
+    def create_gigachat_panel(self):
+        self.gigachat_panel = GigaChatPanel(self)
 
     def toggle_menu(self):
         if self.menu_dock.isVisible():
@@ -170,7 +359,19 @@ class DevMetricsApp(QMainWindow):
             self.tabs.show()
         else:
             self.tabs.hide()
+            self.work_schedule_widget.hide()
             self.settings_widget.show()
+            if self.menu_dock.isVisible():
+                self.toggle_menu()
+
+    def toggle_work_schedule(self):
+        if self.work_schedule_widget.isVisible():
+            self.work_schedule_widget.hide()
+            self.tabs.show()
+        else:
+            self.tabs.hide()
+            self.settings_widget.hide()
+            self.work_schedule_widget.show()
             if self.menu_dock.isVisible():
                 self.toggle_menu()
 
@@ -178,223 +379,645 @@ class DevMetricsApp(QMainWindow):
         project_path = self.settings.value("project_path", "")
         self.settings_panel.project_path_input.setText(project_path)
 
+        # Загружаем тему, по умолчанию "Светлая"
         theme = self.settings.value("theme", "Светлая")
         self.settings_panel.theme_selector.setCurrentText(theme)
         self.settings_panel.change_theme(theme)
 
-        self.update_time_metrics()
-        self.update_code_metrics()
-        self.update_graph_metrics()
+        self.update_years()
+        self.update_opening_hours()
+        self.update_years_charts()
+        self.update_charts()
+        self.update_code_analysis_years()
+        self.populate_files_list()
+        self.update_code_analysis()
+        self.start_file_watcher(project_path)
 
     def closeEvent(self, event):
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
         self.settings.setValue("project_path", self.settings_panel.project_path_input.text())
         self.settings.setValue("theme", self.settings_panel.theme_selector.currentText())
         event.accept()
 
-    def update_time_metrics(self):
+    def stop_file_watcher(self):
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+            self.observer = None
+
+    def start_file_watcher(self, project_path):
+        self.stop_file_watcher()
+        self.observer = start_file_watcher(self, project_path)
+
+    def update_years(self):
         project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.time_metrics.setText("Укажите путь к проекту в настройках")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
-            return
-
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            if not commits:
-                self.time_metrics.setText("В репозитории нет коммитов")
-                self.time_heatmap.axes.clear()
-                self.time_heatmap.draw()
-                return
+            years = get_years(project_path)
+            self.year_selector.clear()
+            self.year_selector.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.year_selector.setCurrentText(current_year)
+        except Exception as e:
+            logging.error(f"Error in update_years: {str(e)}")
+            self.year_selector.clear()
+            self.year_selector.addItems([str(datetime.now().year)])
 
-            today = datetime.now()
-            week_ago = today - timedelta(days=7)
-            daily_hours = 0
-            weekly_hours = 0
-            session_times = []
-            last_commit_time = None
+    def update_years_charts(self):
+        project_path = self.settings_panel.project_path_input.text()
+        try:
+            years = get_years(project_path)
+            self.year_selector_charts.clear()
+            self.year_selector_charts.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.year_selector_charts.setCurrentText(current_year)
+        except Exception as e:
+            logging.error(f"Error in update_years_charts: {str(e)}")
+            self.year_selector_charts.clear()
+            self.year_selector_charts.addItems([str(datetime.now().year)])
 
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                if commit_time.date() == today.date():
-                    daily_hours += 1 / 60
-                if commit_time >= week_ago:
-                    weekly_hours += 1 / 60
-                if last_commit_time:
-                    session_times.append((last_commit_time - commit_time).total_seconds() / 3600)
-                last_commit_time = commit_time
-
-            avg_session = sum(session_times) / len(session_times) if session_times else 0
-
-            norm_hours = 8
-            overtime = max(0, daily_hours - norm_hours)
-            underwork = max(0, norm_hours - daily_hours)
-
-            metrics_text = (
-                f"Часы кодинга сегодня: {daily_hours:.2f} ч\n"
-                f"Часы кодинга за неделю: {weekly_hours:.2f} ч\n"
-                f"Средняя продолжительность сессии: {avg_session:.2f} ч\n"
-                f"Овертайм: {overtime:.2f} ч\n"
-                f"Недоработка: {underwork:.2f} ч"
-            )
+    def update_opening_hours(self):
+        project_path = self.settings_panel.project_path_input.text()
+        month = self.month_selector.currentIndex() + 1
+        year = int(self.year_selector.currentText()) if self.year_selector.currentText() else datetime.now().year
+        try:
+            metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end = update_opening_hours(project_path, month, year)
+            self.time_data = {
+                'metrics_text': metrics_text,
+                'days': days,
+                'hours': hours,
+                'weekend_days': weekend_days,
+                'heatmap_data': heatmap_data,
+                'month_days': month_days,
+                'daily_metrics': daily_metrics,
+                'hourly_activity': hourly_activity,
+                'work_hours': {
+                    'start': work_start,
+                    'end': work_end,
+                    'lunch_start': lunch_start,
+                    'lunch_end': lunch_end
+                }
+            }
             self.time_metrics.setText(metrics_text)
 
-            hours = np.zeros((7, 24))
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                if commit_time >= week_ago:
-                    day = commit_time.weekday()
-                    hour = commit_time.hour
-                    hours[day, hour] += 1
+            # Обновляем выпадающий список дней
+            self.day_selector.clear()
+            self.day_selector.addItems([f"День {day}" for day in days])
+            self.day_selector.setCurrentIndex(0)
 
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.axes.imshow(hours, cmap='hot', interpolation='nearest')
-            self.time_heatmap.axes.set_xticks(range(24))
-            self.time_heatmap.axes.set_yticks(range(7))
-            self.time_heatmap.axes.set_yticklabels(['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'])
-            self.time_heatmap.axes.set_xlabel("Часы")
-            self.time_heatmap.axes.set_ylabel("Дни недели")
-            self.time_heatmap.axes.set_title("Heatmap активности")
-            self.time_heatmap.draw()
+            # Обновляем метрики для выбранного дня
+            self.update_day_metrics()
 
-        except InvalidGitRepositoryError:
-            self.time_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
+            # Обновляем гистограмму активности
+            self.update_activity_histogram()
+
         except Exception as e:
-            self.time_metrics.setText(f"Ошибка при анализе репозитория: {str(e)}")
-            self.time_heatmap.axes.clear()
-            self.time_heatmap.draw()
+            logging.error(f"Error in update_opening_hours: {str(e)}")
+            self.time_metrics.setText(f"Ошибка: {str(e)}")
+            self.time_data = {
+                'metrics_text': '',
+                'days': [],
+                'hours': [],
+                'weekend_days': [],
+                'heatmap_data': np.array([]),
+                'month_days': [],
+                'daily_metrics': {}
+            }
+            self.day_selector.clear()
+            self.day_metrics.setText("Нет данных")
+            self.update_activity_histogram()  # Очищаем гистограмму при ошибке
 
-    def update_code_metrics(self):
+    def update_day_metrics(self):
+        if not self.time_data['daily_metrics']:
+            self.day_metrics.setText("Нет данных")
+            return
+
+        selected_day_text = self.day_selector.currentText()
+        if not selected_day_text:
+            self.day_metrics.setText("Выберите день")
+            return
+
+        selected_day = int(selected_day_text.split()[1])
+        daily_metrics = self.time_data['daily_metrics']
+
+        if selected_day not in daily_metrics:
+            self.day_metrics.setText(f"Нет данных за День {selected_day}")
+            return
+
+        day_data = daily_metrics[selected_day]
+        work_start, work_end = day_data['work_period'] if day_data['work_period'] else (None, None)
+        total_time = day_data['total_time']
+        dead_periods = day_data['dead_periods']
+        commits = day_data['commits']
+        night_commits = day_data['night_commits']
+
+        # Форматируем время работы с проверкой на None
+        work_period = (f"с {work_start.strftime('%H:%M')} до {work_end.strftime('%H:%M')}"
+                       if work_start and work_end else "Нет активности")
+        total_time_str = format_time(total_time) if total_time > 0 else "0ч"
+
+        # Форматируем мёртвые периоды
+        dead_periods_str = ", ".join([f"с {start.strftime('%H:%M')} до {end.strftime('%H:%M')}"
+                                     for start, end in dead_periods]) if dead_periods else "Нет мёртвых периодов"
+
+        metrics_text = (
+            f"Время работы: {work_period}\n"
+            f"Общее время: {total_time_str}\n"
+            f"Мёртвые периоды: {dead_periods_str}\n"
+            f"Коммиты: {commits}\n"
+            f"Ночные коммиты: {night_commits}"
+        )
+        self.day_metrics.setText(metrics_text)
+
+        # Обновляем график активности
+        self.update_activity_histogram()
+
+        # Добавляем отладочный вывод
+        print(f"Обновление графика для дня {selected_day}")
+        print(f"Часовая активность: {self.time_data['hourly_activity']}")
+        print(f"Рабочие часы: {self.time_data['work_hours']}")
+
+    def update_code_analysis_years(self):
+        """Обновляет список лет в выпадающем списке для анализа кода"""
         project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.code_metrics.setText("Укажите путь к проекту в настройках")
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-            return
-
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            added_lines = 0
-            deleted_lines = 0
-            hotspots = {}
-            python_files = [f for f in self.get_project_files(project_path) if f.endswith('.py')]
+            years = get_years(project_path)
+            self.code_year_selector.clear()
+            self.code_year_selector.addItems([str(year) for year in years])
+            current_year = str(datetime.now().year)
+            if current_year in [str(year) for year in years]:
+                self.code_year_selector.setCurrentText(current_year)
+        except Exception as e:
+            logging.error(f"Error in update_code_analysis_years: {str(e)}")
+            self.code_year_selector.clear()
+            self.code_year_selector.addItems([str(datetime.now().year)])
 
-            for commit in commits:
-                diff = commit.stats.total
-                added_lines += diff['insertions']
-                deleted_lines += diff['deletions']
-                for file in commit.stats.files:
-                    hotspots[file] = hotspots.get(file, 0) + 1
+    def update_code_analysis_days(self):
+        """Обновляет список дней в зависимости от выбранного месяца и года"""
+        try:
+            year = int(self.code_year_selector.currentText())
+            month = self.code_month_selector.currentIndex() + 1
+            _, last_day = calendar.monthrange(year, month)
+            
+            self.code_day_selector.clear()
+            self.code_day_selector.addItems([str(day) for day in range(1, last_day + 1)])
+        except Exception as e:
+            logging.error(f"Error in update_code_analysis_days: {str(e)}")
+            self.code_day_selector.clear()
 
-            total_cc = 0
-            complex_files = []
-            for file in python_files:
-                with open(file, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                cc_results = cc_visit(code)
-                file_cc = sum(block.complexity for block in cc_results)
-                total_cc += file_cc
-                if file_cc > 10:
-                    complex_files.append((file, file_cc))
+    def populate_files_list(self):
+        """Заполняет список файлов из репозитория"""
+        project_path = self.settings_panel.project_path_input.text()
+        try:
+            files = get_repository_files(project_path)
+            self.files_list.clear()
+            for file in sorted(files):  # Сортируем файлы по алфавиту
+                self.files_list.addItem(file)
+        except Exception as e:
+            logging.error(f"Error in populate_files_list: {str(e)}")
+            self.files_list.clear()
 
-            avg_cc = total_cc / len(python_files) if python_files else 0
-            hotspots_text = "\n".join(f"{file}: {count} изменений" for file, count in sorted(hotspots.items(), key=lambda x: x[1], reverse=True)[:5])
+    def trigger_code_analysis(self):
+        """Запускает анализ кода с выбранными параметрами"""
+        selected_files = [item.text() for item in self.files_list.selectedItems()]
+        
+        try:
+            year = int(self.code_year_selector.currentText())
+            month = self.code_month_selector.currentIndex() + 1
+            day = int(self.code_day_selector.currentText())
+            
+            date_filter = {
+                'year': year,
+                'month': month,
+                'day': day
+            }
+        except Exception as e:
+            logging.error(f"Error preparing date filter: {str(e)}")
+            date_filter = None
 
-            metrics_text = (
-                f"Добавлено строк: {added_lines}\n"
-                f"Удалено строк: {deleted_lines}\n"
-                f"Средняя цикломатическая сложность: {avg_cc:.2f}\n"
-                f"Сложные файлы:\n" + "\n".join(f"{file}: {cc}" for file, cc in complex_files[:5]) + "\n"
-                f"Часто изменяемые файлы:\n{hotspots_text}\n"
-                f"Рекомендации: Проверить файлы с высокой сложностью для рефакторинга."
+        self.update_code_analysis(selected_files=selected_files, date_filter=date_filter)
+
+    def update_code_analysis(self, selected_files=None, date_filter=None):
+        """Обновленный метод анализа кода с поддержкой фильтров"""
+        project_path = self.settings_panel.project_path_input.text()
+        if not project_path:
+            self.selected_files_metrics.setText("Ошибка: Проект не найден. Укажите путь в настройках.")
+            self.code_metrics.setText("Ошибка: Проект не найден. Укажите путь в настройках.")
+            return
+
+        self.progress_bar.setVisible(True)
+        analysis_result = update_code_analysis(project_path, self.progress_bar, 
+                                            author=None, 
+                                            selected_files=selected_files, 
+                                            date_filter=date_filter)
+        self.progress_bar.setVisible(False)
+
+        if analysis_result.get("error"):
+            self.selected_files_metrics.setText(analysis_result["error"])
+            self.code_metrics.setText(analysis_result["error"])
+            return
+
+        # Отображение статистики по выбранным файлам за конкретный день
+        if selected_files and date_filter and analysis_result.get("files_daily_stats"):
+            files_stats_text = "Статистика по выбранным файлам за {}.{}.{}:\n\n".format(
+                date_filter['day'], date_filter['month'], date_filter['year']
             )
-            self.code_metrics.setText(metrics_text)
+            
+            # Статистика по каждому файлу
+            for file_path, stats in analysis_result["files_daily_stats"].items():
+                files_stats_text += f"Файл: {file_path}\n"
+                files_stats_text += f"  Добавлено строк: {stats['added']}\n"
+                files_stats_text += f"  Удалено строк: {stats['removed']}\n\n"
 
-        except InvalidGitRepositoryError:
-            self.code_metrics.setText("Ошибка: Указанная папка не является Git-репозиторием")
-        except Exception as e:
-            self.code_metrics.setText(f"Ошибка при анализе кода: {str(e)}")
+            # Общая статистика по выбранным файлам за день
+            if analysis_result.get("selected_files_summary_today"):
+                summary = analysis_result["selected_files_summary_today"]
+                files_stats_text += "\nОбщая статистика по выбранным файлам за день:\n"
+                files_stats_text += f"Всего добавлено строк: {summary['total_lines_added']}\n"
+                files_stats_text += f"Всего удалено строк: {summary['total_lines_removed']}\n"
+            
+            self.selected_files_metrics.setText(files_stats_text)
+        else:
+            self.selected_files_metrics.setText(
+                "Выберите файлы и дату для просмотра детальной статистики"
+            )
 
-    def update_graph_metrics(self):
+        # Отображение общей статистики за все время
+        if analysis_result.get("overall_metrics_all_time"):
+            all_time_metrics = analysis_result["overall_metrics_all_time"]
+            all_time_text = "Статистика за все время работы над проектом:\n\n"
+            all_time_text += f"Общее количество изменённых файлов: {all_time_metrics['total_files_changed']}\n"
+            all_time_text += f"Всего добавлено строк: {all_time_metrics['total_lines_added']}\n"
+            all_time_text += f"Всего удалено строк: {all_time_metrics['total_lines_removed']}\n"
+            all_time_text += f"Распределение по расширениям: {dict(sorted(all_time_metrics['files_by_extension'].items()))}\n"
+            
+            self.code_metrics.setText(all_time_text)
+        else:
+            self.code_metrics.setText("Нет данных об изменениях в проекте")
+
+    def update_charts(self):
         project_path = self.settings_panel.project_path_input.text()
-        if not project_path or not os.path.exists(project_path):
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
-            return
-
-        if not os.path.exists(os.path.join(project_path, '.git')):
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
-            return
-
+        month = self.month_selector_charts.currentIndex() + 1
+        year = int(self.year_selector_charts.currentText()) if self.year_selector_charts.currentText() else datetime.now().year
         try:
-            repo = Repo(project_path)
-            commits = list(repo.iter_commits(max_count=100))
-            weeks = 4
-            commits_per_week = [0] * weeks
-            today = datetime.now()
-            for commit in commits:
-                commit_time = datetime.fromtimestamp(commit.committed_date)
-                weeks_ago = (today - commit_time).days // 7
-                if weeks_ago < weeks:
-                    commits_per_week[weeks_ago] += 1
-
-            self.trend_graph.axes.clear()
-            self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o')
-            self.trend_graph.axes.set_xticks(range(weeks))
-            self.trend_graph.axes.set_xticklabels([f"Неделя {i+1}" for i in range(weeks)])
-            self.trend_graph.axes.set_xlabel("Недели")
-            self.trend_graph.axes.set_ylabel("Количество коммитов")
-            self.trend_graph.axes.set_title("Тренд продуктивности")
-            self.trend_graph.draw()
-
-        except InvalidGitRepositoryError:
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
+            # Получаем данные о времени работы
+            metrics_text, days, hours, weekend_days, heatmap_data, month_days, daily_metrics, hourly_activity, work_start, work_end, lunch_start, lunch_end = update_opening_hours(project_path, month, year)
+            
+            # Обновляем данные о времени
+            self.chart_time_data = {
+                'metrics_text': metrics_text,
+                'days': days,
+                'hours': hours,
+                'weekend_days': weekend_days,
+                'heatmap_data': heatmap_data,
+                'month_days': month_days,
+                'daily_metrics': daily_metrics,
+                'hourly_activity': hourly_activity,
+                'work_hours': {
+                    'start': work_start,
+                    'end': work_end,
+                    'lunch_start': lunch_start,
+                    'lunch_end': lunch_end
+                }
+            }
+            
+            # Получаем данные для графиков
+            weeks, commits_per_week, commit_hours, commit_heatmap, project_name = update_charts(project_path, year, month)
+            
+            # Обновляем данные графиков
+            self.chart_data = {
+                'weeks': weeks,
+                'commits_per_week': commits_per_week,
+                'commit_hours': commit_hours,
+                'commit_heatmap': commit_heatmap,
+                'project_name': project_name
+            }
+            
+            # Обновляем отображение
+            self.update_dashboard()
+            
         except Exception as e:
-            self.trend_graph.axes.clear()
-            self.trend_graph.draw()
+            logging.error(f"Error in update_charts: {str(e)}")
+            self.chart_time_data = {
+                'metrics_text': '',
+                'days': [],
+                'hours': [],
+                'weekend_days': [],
+                'heatmap_data': np.array([]),
+                'month_days': [],
+                'daily_metrics': {},
+                'hourly_activity': {},
+                'work_hours': {
+                    'start': None,
+                    'end': None,
+                    'lunch_start': None,
+                    'lunch_end': None
+                }
+            }
+            self.chart_data = {
+                'weeks': 0,
+                'commits_per_week': [],
+                'commit_hours': [],
+                'commit_heatmap': None,
+                'project_name': ''
+            }
+            self.update_dashboard()
 
-    def get_project_files(self, project_path):
-        files = []
-        for root, _, filenames in os.walk(project_path):
-            for filename in filenames:
-                if filename.endswith(('.py', '.js', '.java', '.cs', '.cpp', '.h', '.go', '.rs', '.kt', '.swift',
-                                      '.json', '.yaml', '.yml', '.toml', '.env', 'Dockerfile', '.dockerignore',
-                                      '.md', '.rst', 'README.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md',
-                                      'CODESTYLE.md', 'package.json', 'requirements.txt', 'pom.xml', 'build.gradle',
-                                      'Cargo.toml', '.csproj', '.sln', '.css', '.scss', '.png', '.jpg', '.svg', '.html')):
-                    files.append(os.path.join(root, filename))
-        return files
+    def update_dashboard(self):
+        # Определяем текущую тему
+        theme = self.settings_panel.theme_selector.currentText()
+
+        # Настройки цветов для графиков в зависимости от темы
+        if theme == "Светлая":
+            text_color = 'black'
+            bg_color = 'white'
+            grid_color = 'gray'
+        elif theme == "Темная":
+            text_color = 'white'
+            bg_color = '#353535'
+            grid_color = 'lightgray'
+        else:  # Темный контраст
+            text_color = '#6B8E23'
+            bg_color = '#000000'
+            grid_color = '#6B8E23'
+
+        # Тренд продуктивности
+        self.trend_graph.axes.clear()
+        weeks = self.chart_data['weeks']
+        commits_per_week = self.chart_data['commits_per_week']
+        if weeks and commits_per_week and any(commits_per_week):
+            self.trend_graph.axes.plot(range(weeks), commits_per_week[::-1], marker='o', color='orange')
+            self.trend_graph.axes.set_xticks(range(weeks))
+            self.trend_graph.axes.set_xticklabels([f"Неделя {i + 1}" for i in range(weeks)], color=text_color)
+            self.trend_graph.axes.set_xlabel("Недели", color=text_color)
+            self.trend_graph.axes.set_ylabel("Количество коммитов", color=text_color)
+            self.trend_graph.axes.set_title("Тренд продуктивности", color=text_color)
+        else:
+            self.trend_graph.axes.text(0.5, 0.5, "Нет данных для графика", ha='center', va='center', fontsize=12, color=text_color)
+            self.trend_graph.axes.set_xlabel("Недели", color=text_color)
+            self.trend_graph.axes.set_ylabel("Количество коммитов", color=text_color)
+            self.trend_graph.axes.set_title("Тренд продуктивности", color=text_color)
+        
+        self.trend_graph.axes.set_facecolor(bg_color)
+        self.trend_graph.figure.set_facecolor(bg_color)
+        self.trend_graph.axes.tick_params(colors=text_color)
+        self.trend_graph.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
+        self.trend_graph.draw()
+
+        # Гистограмма отработанного времени
+        self.dash_histogram.axes.clear()
+        days = self.chart_time_data['days']
+        hours = self.chart_time_data['hours']
+        weekend_days = self.chart_time_data['weekend_days']
+        if days and any(hours):
+            hours_per_day = self.work_schedule_panel.get_hours_per_day()
+            colors = []
+            for i, day in enumerate(days):
+                if day in weekend_days:
+                    colors.append('red')
+                elif hours[i] > hours_per_day:
+                    colors.append('orange')
+                else:
+                    colors.append('blue')
+
+            self.dash_histogram.axes.bar(days, hours, color=colors)
+            self.dash_histogram.axes.set_xticks(days)
+            labels = [str(day) for day in days]
+            for i, label in enumerate(self.dash_histogram.axes.get_xticklabels()):
+                label.set_color('red' if days[i] in weekend_days else text_color)
+            self.dash_histogram.axes.set_xticklabels(labels, color=text_color)
+            self.dash_histogram.axes.set_xlabel("Дни месяца", color=text_color)
+            self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
+            month = self.month_selector_charts.currentText()
+            year = self.year_selector_charts.currentText() or str(datetime.now().year)
+            self.dash_histogram.axes.set_title(f"График отработанного времени ({month} {year})", color=text_color)
+            max_hours = max(int(np.ceil(max(hours, default=0))), int(hours_per_day))
+            self.dash_histogram.axes.set_yticks(np.arange(0, max_hours + 1, 1))
+        else:
+            self.dash_histogram.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12, color=text_color)
+            self.dash_histogram.axes.set_xlabel("Дни месяца", color=text_color)
+            self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
+            self.dash_histogram.axes.set_title("График отработанного времени", color=text_color)
+        
+        self.dash_histogram.axes.set_facecolor(bg_color)
+        self.dash_histogram.figure.set_facecolor(bg_color)
+        self.dash_histogram.axes.tick_params(colors=text_color)
+        self.dash_histogram.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
+        self.dash_histogram.draw()
+
+        # Heatmap активности
+        self.dash_heatmap.figure.clear()
+        self.dash_heatmap.axes = self.dash_heatmap.figure.add_subplot(111)
+        self.dash_heatmap.figure.set_size_inches(8, 3)
+        
+        # Удаляем старый colorbar, если он существует
+        if hasattr(self.dash_heatmap, 'colorbar') and self.dash_heatmap.colorbar:
+            try:
+                self.dash_heatmap.colorbar.remove()
+            except:
+                pass
+            self.dash_heatmap.colorbar = None
+            
+        heatmap_data = self.chart_time_data['heatmap_data']
+        month_days = self.chart_time_data['month_days']
+        
+        if heatmap_data.size > 0 and heatmap_data.any():
+            self.dash_heatmap.axes.set_position([0.1, 0.4, 0.7, 0.5])
+            sns.heatmap(heatmap_data, ax=self.dash_heatmap.axes, cmap="YlOrRd",
+                        xticklabels=[f"{i}:00" for i in range(0, 24, 3)],
+                        yticklabels=[str(day) for day in month_days],
+                        cbar_kws={'label': 'Количество коммитов', 'shrink': 0.8, 'pad': 0.05})
+            
+            self.dash_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)", color=text_color)
+            self.dash_heatmap.axes.set_xlabel("Часы", color=text_color)
+            self.dash_heatmap.axes.set_ylabel("Дни месяца", color=text_color)
+            self.dash_heatmap.axes.tick_params(axis='x', labelsize=5, rotation=90, colors=text_color)
+            self.dash_heatmap.axes.tick_params(axis='y', labelsize=8, colors=text_color)
+            
+            # Сохраняем ссылку на colorbar и настраиваем его цвета
+            self.dash_heatmap.colorbar = self.dash_heatmap.axes.collections[0].colorbar
+            self.dash_heatmap.colorbar.set_label('Количество коммитов', color=text_color)
+            self.dash_heatmap.colorbar.ax.yaxis.set_tick_params(color=text_color)
+            self.dash_heatmap.colorbar.ax.tick_params(colors=text_color)
+            for label in self.dash_heatmap.colorbar.ax.get_yticklabels():
+                label.set_color(text_color)
+        else:
+            self.dash_heatmap.axes.set_position([0.1, 0.4, 0.8, 0.5])
+            self.dash_heatmap.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', fontsize=12, color=text_color)
+            self.dash_heatmap.axes.set_xlabel("Часы", color=text_color)
+            self.dash_heatmap.axes.set_ylabel("Дни месяца", color=text_color)
+            self.dash_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)", color=text_color)
+        
+        self.dash_heatmap.axes.set_facecolor(bg_color)
+        self.dash_heatmap.figure.set_facecolor(bg_color)
+        self.dash_heatmap.figure.tight_layout()
+        self.dash_heatmap.draw()
+
+    def update_activity_histogram(self):
+        try:
+            if not hasattr(self, 'activity_chart'):
+                return
+
+            # Определяем текущую тему
+            theme = self.settings_panel.theme_selector.currentText()
+
+            # Настройки цветов для графиков в зависимости от темы
+            if theme == "Светлая":
+                text_color = 'black'
+                bg_color = 'white'
+                grid_color = 'gray'
+                line_color = 'blue'
+            elif theme == "Темная":
+                text_color = 'white'
+                bg_color = '#353535'
+                grid_color = 'lightgray'
+                line_color = 'lightblue'
+            else:  # Темный контраст
+                text_color = '#6B8E23'
+                bg_color = '#000000'
+                grid_color = '#6B8E23'
+                line_color = '#6B8E23'
+
+            # Очищаем график
+            self.activity_chart.clear_and_reset()
+            
+            selected_day_text = self.day_selector.currentText()
+            if not selected_day_text:
+                self.activity_chart.draw()
+                return
+
+            try:
+                selected_day = int(selected_day_text.split()[1])
+            except (IndexError, ValueError):
+                print(f"Ошибка при получении номера дня из '{selected_day_text}'")
+                return
+
+            # Получаем данные
+            daily_metrics = self.time_data.get('daily_metrics', {})
+            hourly_activity = self.time_data.get('hourly_activity', {})
+
+            if selected_day in daily_metrics and selected_day in hourly_activity:
+                # Создаем массив часов (0-23)
+                hours = list(range(24))
+                
+                # Получаем данные о коммитах по часам для выбранного дня
+                commits_by_hour = hourly_activity[selected_day]
+
+                # Получаем рабочие часы из данных дня
+                day_data = daily_metrics[selected_day]
+                work_period = day_data.get('work_period', (None, None))
+                work_start, work_end = work_period if work_period else (None, None)
+
+                # Создаем график
+                self.activity_chart.axes.plot(hours, commits_by_hour, color=line_color, 
+                                            marker='o', linestyle='-', label='Коммиты')
+                
+                # Добавляем вертикальные линии для рабочего времени
+                if work_start and work_end:
+                    self.activity_chart.axes.axvline(x=work_start.hour, color='green', 
+                                                   linestyle='--', label='Начало работы')
+                    self.activity_chart.axes.axvline(x=work_end.hour, color='red', 
+                                                   linestyle='--', label='Конец работы')
+
+                    # Добавляем линии обеда
+                    self.activity_chart.axes.axvline(x=12, color='orange', 
+                                                   linestyle='--', label='Начало обеда')
+                    self.activity_chart.axes.axvline(x=13, color='orange', 
+                                                   linestyle='--', label='Конец обеда')
+
+                # Настройка осей и подписей
+                self.activity_chart.axes.set_xlabel("Часы", color=text_color)
+                self.activity_chart.axes.set_ylabel("Количество коммитов", color=text_color)
+                self.activity_chart.axes.set_title(f"Активность за день {selected_day}", color=text_color)
+                self.activity_chart.axes.set_xticks(hours)
+                self.activity_chart.axes.set_xlim(-0.5, 23.5)
+                
+                # Устанавливаем максимальное значение по Y
+                max_commits = max(commits_by_hour)
+                if max_commits > 0:
+                    self.activity_chart.axes.set_ylim(-0.1, max_commits + 0.5)
+                
+                self.activity_chart.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
+                self.activity_chart.axes.legend(loc='upper right', facecolor=bg_color, labelcolor=text_color)
+
+            else:
+                self.activity_chart.axes.text(0.5, 0.5, "Нет данных", ha='center', va='center', 
+                                            fontsize=12, color=text_color)
+                self.activity_chart.axes.set_xlabel("Часы", color=text_color)
+                self.activity_chart.axes.set_ylabel("Количество коммитов", color=text_color)
+
+            # Настройка цветов и отрисовка
+            self.activity_chart.axes.set_facecolor(bg_color)
+            self.activity_chart.fig.set_facecolor(bg_color)
+            self.activity_chart.axes.tick_params(colors=text_color)
+            self.activity_chart.fig.tight_layout()
+            self.activity_chart.draw()
+
+        except Exception as e:
+            print(f"Ошибка при обновлении графика: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = fig.add_subplot(111)
-        super().__init__(fig)
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        
         self.setParent(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
 
-
-
-
-
-
+    def clear_and_reset(self):
+        self.axes.clear()
+        self.fig.tight_layout()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # Загрузка шрифта из файла
+    font_db = QFontDatabase()
+    font_path = os.path.join("TDAText", "TDAText.ttf")
+    font_size = 10
+    font_family = None
+
+    try:
+        if os.path.exists(font_path):
+            font_id = font_db.addApplicationFont(font_path)
+            if font_id != -1:
+                font_families = font_db.applicationFontFamilies(font_id)
+                if font_families:
+                    font_family = font_families[0]
+                    logging.info(f"Шрифт {font_family} успешно загружен из {font_path}")
+                else:
+                    logging.error(f"Не удалось получить имя шрифта из файла {font_path}")
+            else:
+                logging.error(f"Не удалось загрузить шрифт из файла {font_path}")
+        else:
+            logging.error(f"Файл шрифта {font_path} не найден")
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке шрифта: {str(e)}")
+
+    if font_family:
+        app_font = QFont(font_family, font_size)
+    else:
+        logging.warning("Шрифт TDAText не загружен, используется Arial")
+        app_font = QFont("Arial", font_size)
+    app.setFont(app_font)
+
+    if font_family:
+        font_manager = fm.FontManager()
+        font_manager.addfont(font_path)
+        plt.rcParams['font.family'] = font_family
+        plt.rcParams['font.size'] = font_size
+    else:
+        plt.rcParams['font.family'] = 'Arial'
+        plt.rcParams['font.size'] = font_size
+
     window = DevMetricsApp()
     window.show()
     sys.exit(app.exec_())
