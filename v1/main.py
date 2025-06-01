@@ -1,24 +1,29 @@
 import sys
 import os
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
-                             QPushButton, QTabWidget, QHBoxLayout, QDockWidget,
-                             QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox,
-                             QGroupBox, QListWidget, QSizePolicy)
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QAction, 
+                               QFileDialog, QProgressDialog, QMessageBox, QSplitter, 
+                               QPushButton, QTabWidget, QHBoxLayout, QDockWidget, 
+                               QDesktopWidget, QLabel, QTextEdit, QProgressBar, QComboBox, 
+                               QGroupBox, QListWidget, QSizePolicy, QDialog)
 from PyQt5.QtCore import Qt, QRect, QPropertyAnimation, QSettings
 from PyQt5.QtGui import QIcon, QFont, QFontDatabase
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from settings import SettingsPanel
-from OpeningHours import update_opening_hours, get_years, format_time
-from CodeAnalysis import update_code_analysis, get_repository_files
-from Charts import update_charts
-from file_watcher import start_file_watcher
-from WorkSchedule import WorkSchedulePanel
-from gigachat_integration import GigaChatPanel
+from application.settings import SettingsPanel
+from application.OpeningHours import update_opening_hours, get_years, format_time
+from application.CodeAnalysis import update_code_analysis, get_repository_files
+from application.Charts import update_charts
+from application.file_watcher import start_file_watcher
+from application.WorkSchedule import WorkSchedulePanel, get_schedule, get_hours_per_day
+from application.gigachat_integration import GigaChatPanel
+from application.admin_window import AdminAppWindow
+from authentication.auth_dialog import AuthDialog
+from database import init_db
 from datetime import datetime
 import numpy as np
+
 import calendar
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -32,13 +37,17 @@ logging.basicConfig(filename='devmetrics.log', level=logging.ERROR,
 # Настройка matplotlib для поддержки кириллицы
 plt.rcParams['font.family'] = 'DejaVu Sans'
 
-class DevMetricsApp(QMainWindow):
-    def __init__(self):
+class UserApp(QMainWindow):
+    def __init__(self, user_id, user_role, user_email, user_full_name):
         super().__init__()
-        self.setWindowTitle("Анализатор продуктивности")
+        self.setWindowTitle("Панель разработчика: Анализ продуктивности")
         self.settings = QSettings("MyCompany", "DevMetricsApp")
         self.observer = None
         self.chart_data = {'weeks': 0, 'commits_per_week': []}
+        self.current_user_id = user_id
+        self.current_user_role = user_role
+        self.current_user_email = user_email
+        self.current_user_full_name = user_full_name
         self.time_data = {
             'metrics_text': '',
             'days': [],
@@ -535,11 +544,6 @@ class DevMetricsApp(QMainWindow):
         # Обновляем график активности
         self.update_activity_histogram()
 
-        # Добавляем отладочный вывод
-        print(f"Обновление графика для дня {selected_day}")
-        print(f"Часовая активность: {self.time_data['hourly_activity']}")
-        print(f"Рабочие часы: {self.time_data['work_hours']}")
-
     def update_code_analysis_years(self):
         """Обновляет список лет в выпадающем списке для анализа кода"""
         project_path = self.settings_panel.project_path_input.text()
@@ -761,8 +765,8 @@ class DevMetricsApp(QMainWindow):
             self.trend_graph.axes.set_ylabel("Количество коммитов", color=text_color)
             self.trend_graph.axes.set_title("Тренд продуктивности", color=text_color)
         
-        self.trend_graph.axes.set_facecolor(bg_color)
-        self.trend_graph.figure.set_facecolor(bg_color)
+            self.trend_graph.axes.set_facecolor(bg_color)
+            self.trend_graph.figure.set_facecolor(bg_color)
         self.trend_graph.axes.tick_params(colors=text_color)
         self.trend_graph.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
         self.trend_graph.draw()
@@ -802,8 +806,8 @@ class DevMetricsApp(QMainWindow):
             self.dash_histogram.axes.set_ylabel("Отработанные часы", color=text_color)
             self.dash_histogram.axes.set_title("График отработанного времени", color=text_color)
         
-        self.dash_histogram.axes.set_facecolor(bg_color)
-        self.dash_histogram.figure.set_facecolor(bg_color)
+            self.dash_histogram.axes.set_facecolor(bg_color)
+            self.dash_histogram.figure.set_facecolor(bg_color)
         self.dash_histogram.axes.tick_params(colors=text_color)
         self.dash_histogram.axes.grid(True, color=grid_color, linestyle='--', alpha=0.7)
         self.dash_histogram.draw()
@@ -851,9 +855,9 @@ class DevMetricsApp(QMainWindow):
             self.dash_heatmap.axes.set_ylabel("Дни месяца", color=text_color)
             self.dash_heatmap.axes.set_title("Heatmap активности (коммиты по дням и часам)", color=text_color)
         
-        self.dash_heatmap.axes.set_facecolor(bg_color)
-        self.dash_heatmap.figure.set_facecolor(bg_color)
-        self.dash_heatmap.figure.tight_layout()
+            self.dash_heatmap.axes.set_facecolor(bg_color)
+            self.dash_heatmap.figure.set_facecolor(bg_color)
+            self.dash_heatmap.figure.tight_layout()
         self.dash_heatmap.draw()
 
     def update_activity_histogram(self):
@@ -986,6 +990,15 @@ if __name__ == "__main__":
     font_family = None
 
     try:
+        # Инициализация базы данных перед любыми операциями
+        init_db()
+        logging.info("Database initialized (or tables already exist).")
+    except Exception as e:
+        logging.error(f"Failed to initialize database: {str(e)}")
+        # В зависимости от критичности, можно показать QMessageBox или просто залогировать
+        # Для простоты, пока просто логируем и продолжаем
+
+    try:
         if os.path.exists(font_path):
             font_id = font_db.addApplicationFont(font_path)
             if font_id != -1:
@@ -1009,15 +1022,37 @@ if __name__ == "__main__":
         app_font = QFont("Arial", font_size)
     app.setFont(app_font)
 
+    # Настройка шрифта для Matplotlib
     if font_family:
         font_manager = fm.FontManager()
-        font_manager.addfont(font_path)
+        font_manager.addfont(font_path) # Добавляем шрифт в Matplotlib
         plt.rcParams['font.family'] = font_family
-        plt.rcParams['font.size'] = font_size
+        plt.rcParams['font.size'] = font_size # Устанавливаем размер шрифта для Matplotlib
     else:
-        plt.rcParams['font.family'] = 'Arial'
+        plt.rcParams['font.family'] = 'Arial' # Запасной вариант, если шрифт не загружен
         plt.rcParams['font.size'] = font_size
 
-    window = DevMetricsApp()
-    window.show()
-    sys.exit(app.exec_())
+    # Сначала показываем диалог авторизации
+    auth_dialog = AuthDialog()
+    if auth_dialog.exec_() == QDialog.Accepted:
+        # Если авторизация успешна, запускаем основное приложение
+        user_data = {
+            "user_id": auth_dialog.user_id,
+            "user_role": auth_dialog.user_role,
+            "user_email": auth_dialog.user_email,
+            "user_full_name": auth_dialog.user_full_name
+        }
+        
+        if auth_dialog.user_role == 'admin':
+            window = AdminAppWindow(**user_data)
+        elif auth_dialog.user_role in ['solo_developer', 'team_developer']:
+            window = UserApp(**user_data) # Используем переименованный класс
+        else:
+            QMessageBox.critical(None, "Ошибка роли", f"Неизвестная роль пользователя: {auth_dialog.user_role}")
+            sys.exit(1) # Выход, если роль не определена
+            
+        window.show()
+        sys.exit(app.exec_())
+    else:
+        # Если авторизация не удалась или была отменена, приложение закрывается
+        sys.exit(0)
