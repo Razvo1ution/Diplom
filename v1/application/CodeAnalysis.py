@@ -117,16 +117,6 @@ def update_code_analysis(project_path, progress_bar=None, author=None, selected_
             day = date_filter['day']
             month = date_filter['month']
             year = date_filter['year']
-            # Фильтрация коммитов по дате - это сложная задача, требующая аккуратной работы
-            # с датами коммитов. GitPython позволяет фильтровать по since/until,
-            # но нужно будет правильно сформировать эти параметры из date_filter.
-            # Для одного дня это будет диапазон от начала до конца дня.
-            # ПОКА ЭТА ЧАСТЬ НЕ РЕАЛИЗОВАНА ПОЛНОСТЬЮ
-            
-            # Примерная логика (требует доработки и тестирования):
-            # from_date = datetime(year, month, day, 0, 0, 0)
-            # to_date = datetime(year, month, day, 23, 59, 59)
-            # commits_to_analyze = list(repo.iter_commits(author=author, since=from_date.isoformat(), until=to_date.isoformat()))
             pass # Оставляем commits_to_analyze как есть на данном этапе
 
 
@@ -144,9 +134,7 @@ def update_code_analysis(project_path, progress_bar=None, author=None, selected_
             'total_lines_removed': 0,
             'files_by_extension': {}
         }
-        
-        # Статистика по выбранным файлам за указанный день (если указаны)
-        # Это будет агрегированная статистика, если selected_files не None и date_filter не None
+
         files_daily_stats = {} # {'file_path': {'added': X, 'removed': Y, 'date': 'YYYY-MM-DD'}}
 
         # Общая статистика по выбранным файлам за указанный день (сумма)
@@ -175,20 +163,9 @@ def update_code_analysis(project_path, progress_bar=None, author=None, selected_
             else: # Если фильтр даты не активен, обрабатываем все коммиты
                 filter_active_for_commit = True
 
-
-            # diff_stat = repo.git.diff(parent.hexsha, commit.hexsha, numstat=True) # Сравнение с родителем
-            # Если selected_files указаны, нужно получить diff только для них
             diff_files_arg = selected_files if selected_files else None
-            
-            # Если selected_files - пустой список, это может вызвать ошибку или неожиданное поведение в git.diff
-            # Поэтому, если selected_files пуст, но предполагается анализ (например, по дате),
-            # мы можем либо анализировать все файлы (diff_files_arg=None), либо ничего не делать (зависит от требований).
-            # Пока оставим None, если selected_files пуст, что приведет к анализу всех файлов в коммите.
 
             try:
-                # Чтобы получить изменения для конкретных файлов, передаем их в diff
-                # Если selected_files это None, то git.diff возьмет все файлы
-                # Если selected_files это [], то могут быть проблемы, лучше None
                 diff_args = [parent.hexsha, commit.hexsha]
                 if diff_files_arg: # Если есть выбранные файлы, добавляем их к аргументам diff
                     diff_args.append('--')
@@ -282,15 +259,6 @@ def update_code_analysis(project_path, progress_bar=None, author=None, selected_
             "selected_files_summary_today": selected_files_summary_today,
             "error": None
         }
-
-        # --- Расчет "всех изменений в проекте ЗА всё время работы" ---
-        # Для этого нам нужно выполнить еще один проход по всем коммитам без фильтра по автору/дате,
-        # если текущий запрос был с фильтрами.
-        # Чтобы не усложнять, пока overall_metrics_all_time будет таким же, как metrics_for_period_or_author,
-        # если не было фильтров. Если были фильтры, его нужно будет вычислить отдельно.
-        # Для простоты, если есть автор или date_filter, то overall_metrics_all_time будет пустым,
-        # и UI должен будет запросить его отдельно без фильтров.
-        # Или, мы можем всегда вычислять его. Давайте пока так:
         
         all_time_commits = list(repo.iter_commits()) # Все коммиты
         all_time_total_commits = len(all_time_commits)
@@ -359,55 +327,3 @@ def update_code_analysis(project_path, progress_bar=None, author=None, selected_
     finally:
         if progress_bar:
             progress_bar.setVisible(False)
-
-# Старая функция, если вдруг понадобится для обратной совместимости или отладки
-# def одиночная_строка_вывода_старой_функции... (закомментировано, так как мы меняем формат вывода)
-# ... (остальной код старой функции update_code_analysis закомментирован или удален, так как мы его переписали)
-
-# Пример использования (для тестирования):
-# if __name__ == '__main__':
-#     project_repo_path = '.' # Укажите путь к вашему репозиторию
-#     
-#     # Тест 1: Получение списка файлов
-#     # files = get_repository_files(project_repo_path)
-#     # print("Files in repository:", files)
-#     
-#     # Тест 2: Общий анализ (без фильтров)
-#     # analysis_data = update_code_analysis(project_repo_path)
-#     # print("\nOverall Analysis (all time):")
-#     # if analysis_data.get("error"):
-#     #     print(f"Error: {analysis_data['error']}")
-#     # else:
-#     #     print(f"  Total files changed (all time): {analysis_data.get('overall_metrics_all_time', {}).get('total_files_changed')}")
-#     #     print(f"  Total lines added (all time): {analysis_data.get('overall_metrics_all_time', {}).get('total_lines_added')}")
-#     #     print(f"  Total lines removed (all time): {analysis_data.get('overall_metrics_all_time', {}).get('total_lines_removed')}")
-#     #     print(f"  Current query (no filter) - Added: {analysis_data.get('metrics_for_period_or_author', {}).get('total_lines_added')}")
-#
-#     # Тест 3: Анализ с фильтром по дате и файлам
-#     # specific_date = {'year': 2024, 'month': 5, 'day': 20} # Пример даты
-#     # specific_files = ['v1/CodeAnalysis.py'] # Пример файла
-#     # analysis_data_specific = update_code_analysis(project_repo_path, selected_files=specific_files, date_filter=specific_date)
-#     # print(f"\nAnalysis for {specific_date} and files {specific_files}:")
-#     # if analysis_data_specific.get("error"):
-#     #     print(f"Error: {analysis_data_specific['error']}")
-#     # else:
-#     #     print(f"  Daily stats for files: {analysis_data_specific.get('files_daily_stats')}")
-#     #     print(f"  Summary for selected files today: Added: {analysis_data_specific.get('selected_files_summary_today', {}).get('total_lines_added')}, Removed: {analysis_data_specific.get('selected_files_summary_today', {}).get('total_lines_removed')}")
-#     #     print(f"  Metrics for this specific query: Added: {analysis_data_specific.get('metrics_for_period_or_author', {}).get('total_lines_added')}")
-
-# Удаляем старый return, который был ниже
-# metrics_text = (
-# ...
-# )
-# #return metrics_text if author else code_metrics
-# if author:
-# return metrics_text
-# else:
-# # Форматируем словарь code_metrics в строку
-# formatted_metrics = (
-# f"Общее количество изменённых файлов: {code_metrics['total_files_changed']}\n"
-# f"Добавлено строк: {code_metrics['total_lines_added']}\n"
-# f"Удалено строк: {code_metrics['total_lines_removed']}\n"
-# f"Распределение по расширениям: {dict(sorted(code_metrics['files_by_extension'].items()))}"
-# )
-# return formatted_metrics
