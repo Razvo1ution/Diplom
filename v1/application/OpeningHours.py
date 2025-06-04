@@ -230,12 +230,6 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
         if author:
             user_id = get_user_id_by_email(author)
             if user_id:
-                # Сохранение общей метрики рабочего времени за месяц (пример, нужно адаптировать под вашу логику)
-                # Возможно, вам понадобится агрегировать или выбирать конкретную дату для work_time_metrics
-                # Пока что, для примера, будем считать, что work_time_metrics сохраняются на уровне дня,
-                # а не месяца. Этот блок нужно будет доработать в соответствии с тем, как вы хотите
-                # агрегировать и сохранять daily_metrics.
-
                 # Сохранение почасовой активности и коммитов по дням
                 for day_num in days:
                     current_date = datetime(year, month, day_num).date()
@@ -251,13 +245,6 @@ def update_opening_hours(project_path, month, year, max_count=10000, author=None
                     for hour_idx, activity_count in enumerate(hourly_data_for_day):
                         # Предполагаем, что activity_level это просто commit_count для данного часа
                         save_hourly_activity(user_id, current_date, hour_idx, activity_count, activity_count) 
-
-                # Сохранение work_time_metrics (требует осмысления, какие именно данные сохранять)
-                # Функция update_opening_hours возвращает много агрегированных данных за месяц.
-                # Таблица work_time_metrics рассчитана на ежедневные данные.
-                # Нужно решить, как агрегировать или какие конкретные дневные метрики сохранять.
-                # Ниже пример, как можно было бы попытаться сохранить метрики для каждого активного дня,
-                # но это потребует перебора daily_metrics и извлечения нужных полей.
 
                 for day_num, day_data_val in daily_metrics.items():
                     current_date_for_work = datetime(year, month, day_num).date()
